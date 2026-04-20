@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLB Mscore Live Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="page-bg"></div>
+  <main class="dashboard-shell">
+    <section class="hero panel reveal">
+      <div>
+        <p class="eyebrow">MLB Team Ranking Engine</p>
+        <h1>Mscore Command Center</h1>
+        <p class="subhead">Daily-updating ranking dashboard blending your workbook metrics with live MLB results.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="refresh-btn" class="btn-primary">Refresh Now</button>
+        <p id="refresh-time">Loading...</p>
+      </div>
+    </section>
+
+    <section class="stats-grid reveal" id="summary-cards"></section>
+
+    <section class="layout-grid reveal">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Team Rankings</h2>
+          <input id="team-filter" type="text" placeholder="Filter team..." />
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead id="ranking-head">
+              <tr>
+                <th data-column="live_rank">Live</th>
+                <th data-column="workbook_rank">Template</th>
+                <th data-column="team">Team</th>
+                <th data-column="mscore">Mscore</th>
+                <th data-column="live_power_score">Power</th>
+                <th data-column="d_plus_score">D+</th>
+                <th data-column="joe_score">Joe</th>
+                <th data-column="power_minus_d_plus">Power-D+</th>
+                <th data-column="record">W-L</th>
+                <th data-column="win_pct">Win%</th>
+                <th data-column="run_diff">RD</th>
+                <th data-column="streak">Streak</th>
+                <th data-column="projected_wins_162">Proj W</th>
+              </tr>
+            </thead>
+            <tbody id="teams-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="side-column">
+        <div class="panel mini-panel">
+          <h3>Live and Recent Games</h3>
+          <div id="games-list" class="games-list"></div>
+        </div>
+
+        <div class="panel mini-panel">
+          <h3>Prediction Lens</h3>
+          <div id="prediction-bars" class="prediction-bars"></div>
+        </div>
+
+        <div class="panel mini-panel">
+          <h3>Upset / Value Finder</h3>
+          <div id="value-finder-list" class="value-finder-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel reveal" id="model-diagnostics-section">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Model Diagnostics</p>
+          <h2>Tuning + Validation Lab</h2>
+          <p class="subhead-small">Feature importance, ablation impact, and archive status for out-of-sample tracking.</p>
+        </div>
+      </div>
+      <div id="diag-summary" class="diag-summary"></div>
+      <div class="diag-grid">
+        <article class="diag-card">
+          <h3>Win Model Importance</h3>
+          <div id="diag-win-importance" class="diag-list"></div>
+        </article>
+        <article class="diag-card">
+          <h3>Win Model Ablation</h3>
+          <div id="diag-win-ablation" class="diag-list"></div>
+        </article>
+        <article class="diag-card diag-card-wide">
+          <h3>Calibration + Uncertainty</h3>
+          <div id="diag-calibration-summary" class="diag-list"></div>
+          <div class="diag-reliability-wrap">
+            <svg id="diag-reliability-svg" viewBox="0 0 720 320" preserveAspectRatio="xMidYMid meet"></svg>
+          </div>
+          <div id="diag-brier-decomp" class="diag-list"></div>
+        </article>
+        <article class="diag-card">
+          <h3>CLV Tracker</h3>
+          <div id="diag-clv-list" class="diag-list"></div>
+        </article>
+        <article class="diag-card">
+          <h3>Mscore Component Weights</h3>
+          <div id="diag-mscore-importance" class="diag-list"></div>
+        </article>
+        <article class="diag-card">
+          <h3>Mscore Rank Ablation</h3>
+          <div id="diag-mscore-ablation" class="diag-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel reveal" id="advanced-stats-section">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Advanced Stats Lens</p>
+          <h2>Expected Quality Dashboard</h2>
+          <p class="subhead-small">Visualizes xwOBAcon, xFIP, and supporting expected-quality signals for model tuning.</p>
+        </div>
+      </div>
+      <div id="advanced-summary" class="advanced-summary"></div>
+      <div class="advanced-grid">
+        <article class="advanced-card">
+          <div class="advanced-card-head">
+            <h3>xwOBAcon vs xFIP Map</h3>
+            <button id="advanced-export-png" class="advanced-export-btn" type="button">Export PNG</button>
+          </div>
+          <p class="muted-note">Right = stronger expected contact quality. Up = better expected run prevention (lower xFIP).</p>
+          <div class="advanced-scatter-wrap">
+            <svg id="advanced-scatter-svg" viewBox="0 0 960 460" preserveAspectRatio="xMidYMid meet"></svg>
+          </div>
+        </article>
+        <article class="advanced-card">
+          <h3 id="advanced-team-title">Team Percentile Lens</h3>
+          <div id="advanced-team-bars" class="advanced-team-bars"></div>
+          <h4>Expected vs Actual</h4>
+          <div id="advanced-expected-grid" class="advanced-expected-grid"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel reveal" id="rrg-section">
+      <div class="panel-header rrg-header">
+        <div>
+          <p class="eyebrow">Relative Rotation Graph</p>
+          <h2>Momentum Rotation Map</h2>
+          <p class="subhead-small">Tracks team rotation by relative strength (RS-Ratio) and momentum (RS-Momentum).</p>
+        </div>
+        <div class="rrg-controls">
+          <label>
+            Metric
+            <select id="rrg-metric">
+              <option value="power" selected>Power</option>
+              <option value="mscore">Mscore</option>
+              <option value="talent">Talent</option>
+              <option value="form">Form</option>
+              <option value="risk">Risk</option>
+              <option value="dplus">D+</option>
+              <option value="joe">Joe Score</option>
+              <option value="gap">Power-D+</option>
+            </select>
+          </label>
+          <label>
+            Lookback
+            <input id="rrg-lookback" type="range" min="30" max="240" step="5" value="120" />
+            <span id="rrg-lookback-label">120d</span>
+          </label>
+          <label>
+            Trail
+            <select id="rrg-trail-range">
+              <option value="3">Past 3 Days</option>
+              <option value="7" selected>Past Week</option>
+              <option value="30">Past Month</option>
+            </select>
+          </label>
+          <label>
+            Size
+            <select id="rrg-size">
+              <option value="100" selected>100%</option>
+              <option value="125">125%</option>
+              <option value="150">150%</option>
+              <option value="175">175%</option>
+              <option value="200">200%</option>
+            </select>
+          </label>
+          <label>
+            Y Min
+            <input id="rrg-y-min" type="number" step="0.1" placeholder="Auto" />
+          </label>
+          <label>
+            Y Max
+            <input id="rrg-y-max" type="number" step="0.1" placeholder="Auto" />
+          </label>
+          <label class="rrg-toggle-label">
+            <input id="rrg-show-trails" type="checkbox" checked />
+            <span>Show Trails</span>
+          </label>
+          <label class="rrg-team-filter-label">
+            Teams
+            <div class="rrg-team-picker" id="rrg-team-picker">
+              <button id="rrg-team-toggle" type="button">Teams: All</button>
+              <div id="rrg-team-menu" class="rrg-team-menu is-closed">
+                <div class="rrg-team-actions">
+                  <button id="rrg-team-all" type="button">All</button>
+                  <button id="rrg-team-none" type="button">None</button>
+                </div>
+                <div id="rrg-team-options" class="rrg-team-options"></div>
+              </div>
+            </div>
+          </label>
+          <button id="rrg-export-png" class="rrg-export-btn" type="button">Export PNG</button>
+        </div>
+      </div>
+      <p id="rrg-validation" class="muted-note">Loading RRG diagnostics...</p>
+      <div id="rrg-legend" class="rrg-legend"></div>
+      <div id="rrg-chart-wrap" class="rrg-chart-wrap">
+        <svg id="rrg-svg" viewBox="0 0 960 460" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+    </section>
+
+
+    <section class="panel reveal" id="team-detail-section">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Team Deep Dive</p>
+          <h2 id="detail-team-title">Select a Team</h2>
+          <p class="subhead-small">Hover stat labels for meaning. Click any stat to rank all teams by that metric.</p>
+        </div>
+        <input id="stat-filter" type="text" placeholder="Filter stats..." />
+      </div>
+      <div id="team-highlights" class="detail-highlights"></div>
+      <div id="detail-stats-grid" class="detail-stats-grid"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2>Top 10 Live Power</h2>
+      <div id="top-teams-chart" class="bar-chart"></div>
+    </section>
+
+    <section id="error-box" class="error-box hidden"></section>
+  </main>
+
+  <aside id="stat-ranking-sidebar" class="stat-sidebar is-closed" aria-hidden="true">
+    <div class="stat-sidebar-header">
+      <div>
+        <p class="eyebrow">Stat Rankings</p>
+        <h3 id="stat-sidebar-title">Select a Statistic</h3>
+        <p id="stat-sidebar-subtitle" class="subhead-small">Click any stat label/header to compare all teams.</p>
+      </div>
+      <button id="stat-sidebar-close" class="sidebar-close-btn" type="button">Close</button>
+    </div>
+    <div id="stat-sidebar-body" class="stat-sidebar-body">
+      <p class="muted-note">No statistic selected.</p>
+    </div>
+  </aside>
+
+  <aside id="matchup-breakdown-sidebar" class="stat-sidebar matchup-sidebar is-closed" aria-hidden="true">
+    <div class="stat-sidebar-header">
+      <div>
+        <p class="eyebrow">Matchup Breakdown</p>
+        <h3 id="matchup-sidebar-title">Select a Matchup</h3>
+        <p id="matchup-sidebar-subtitle" class="subhead-small">Click any game in Prediction Lens for side-by-side team context.</p>
+      </div>
+      <div class="sidebar-actions">
+        <button id="matchup-export-png" class="sidebar-secondary-btn" type="button" disabled>Export PNG</button>
+        <button id="matchup-sidebar-close" class="sidebar-close-btn" type="button">Close</button>
+      </div>
+    </div>
+    <div id="matchup-sidebar-body" class="stat-sidebar-body">
+      <p class="muted-note">No matchup selected.</p>
+    </div>
+  </aside>
+
+
+  <script src="/static/app.js?v=20260420-sp-compare-v1"></script>
+</body>
+</html>
