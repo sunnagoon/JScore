@@ -17,6 +17,8 @@ const state = {
   rrgTeamUniverse: [],
   rrgTeamSelectionInitialized: false,
   rrgTeamMenuOpen: false,
+  rrgMomentumLeaders: [],
+  rrgMomentumMeta: null,
   starterCompareOpen: {},
 };
 
@@ -74,6 +76,9 @@ const rrgLegend = document.getElementById("rrg-legend");
 const rrgSvg = document.getElementById("rrg-svg");
 const rrgChartWrap = document.getElementById("rrg-chart-wrap");
 const rrgExportPngBtn = document.getElementById("rrg-export-png");
+const rrgMomentumNote = document.getElementById("rrg-momentum-note");
+const rrgMomentumBoards = document.getElementById("rrg-momentum-boards");
+const rrgMomentumExportPngBtn = document.getElementById("rrg-momentum-export-png");
 const advancedSummary = document.getElementById("advanced-summary");
 const advancedScatterSvg = document.getElementById("advanced-scatter-svg");
 const advancedExportPngBtn = document.getElementById("advanced-export-png");
@@ -195,6 +200,17 @@ function safeText(value) {
 
 function normalizeText(value) {
   return String(value ?? "").toLowerCase();
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return null;
+  }
+  return n;
 }
 
 function statId(sourceKind, key) {
@@ -630,6 +646,87 @@ function formatValueTier(tier) {
   return "No Edge";
 }
 
+function formatBetQualityGrade(grade) {
+  const key = String(grade || "pass").trim().toLowerCase();
+  if (key === "a") return "A";
+  if (key === "b") return "B";
+  if (key === "c") return "C";
+  return "Pass";
+}
+
+function computeBetQualityFallback({
+  preMarketHome,
+  marketEdgePick,
+  marketEdgePickRaw,
+  confidence,
+  uncertaintyLevel,
+  uncertaintyMultiplier,
+  bandHalf,
+  marketAvailable,
+}) {
+  const pre = clampProb(Number(preMarketHome ?? 0.5));
+  const edgeRaw = Number(marketEdgePickRaw);
+  const edge = Number(marketEdgePick);
+
+  let edgeBasis = null;
+  if (Number.isFinite(edgeRaw)) {
+    edgeBasis = Math.abs(edgeRaw);
+  } else if (Number.isFinite(edge)) {
+    edgeBasis = Math.abs(edge);
+  } else {
+    edgeBasis = Math.abs(pre - 0.5) * 0.85;
+  }
+
+  const edgeScale = marketAvailable ? 0.08 : 0.05;
+  const edgeStrength = Math.max(0, Math.min(1, Number(edgeBasis) / edgeScale));
+  const confClamped = Math.max(0, Math.min(1, Number(confidence ?? 0)));
+  const confidenceFactor = 0.55 + (0.45 * confClamped);
+
+  const band = Number(bandHalf);
+  let bandFactor = 0.9;
+  if (Number.isFinite(band)) {
+    const bandRef = Math.max(0, Math.min(0.2, band));
+    bandFactor = 1 - ((bandRef / 0.2) * 0.55);
+  }
+  bandFactor = Math.max(0.35, Math.min(1, bandFactor));
+
+  const level = String(uncertaintyLevel || "low").trim().toLowerCase();
+  const levelFactor = level === "high" ? 0.58 : (level === "medium" ? 0.8 : 1.0);
+
+  const marketFactor = marketAvailable ? 1.0 : 0.9;
+  const uncMultRaw = Number(uncertaintyMultiplier);
+  const uncMult = Number.isFinite(uncMultRaw) ? Math.max(0.35, Math.min(1, uncMultRaw)) : 1.0;
+
+  let score = 100 * edgeStrength * confidenceFactor * bandFactor * levelFactor * marketFactor * uncMult;
+  score = Math.max(0, Math.min(99.9, score));
+
+  const edgeForGate = Number.isFinite(edge) ? Math.abs(edge) : Math.abs(pre - 0.5);
+  const actionableCut = marketAvailable ? 60 : 42;
+  const actionable = score >= actionableCut && level !== "high" && edgeForGate >= 0.02;
+
+  return {
+    score: Number(score.toFixed(1)),
+    grade: formatBetQualityGrade(score >= 75 ? "A" : (score >= 60 ? "B" : (score >= 45 ? "C" : "Pass"))),
+    actionable,
+  };
+}
+
+function sortValueFinderRows(a, b) {
+  const qualityA = Number(a.bet_quality_score ?? NaN);
+  const qualityB = Number(b.bet_quality_score ?? NaN);
+  if (Number.isFinite(qualityA) || Number.isFinite(qualityB)) {
+    const qa = Number.isFinite(qualityA) ? qualityA : -1;
+    const qb = Number.isFinite(qualityB) ? qualityB : -1;
+    if (qa !== qb) return qb - qa;
+  }
+
+  const edgeA = a.market_edge_pick === null || a.market_edge_pick === undefined ? -1 : Math.abs(Number(a.market_edge_pick));
+  const edgeB = b.market_edge_pick === null || b.market_edge_pick === undefined ? -1 : Math.abs(Number(b.market_edge_pick));
+  if (edgeA !== edgeB) return edgeB - edgeA;
+
+  return Number(b.confidence || 0) - Number(a.confidence || 0);
+}
+
 function buildValueFinderRows(snapshot) {
   const board = snapshot.prediction_value_board ?? [];
   const matchupGames = snapshot.matchup_predictions ?? [];
@@ -654,6 +751,29 @@ function buildValueFinderRows(snapshot) {
           ? null
           : Number(row.market_pick_prob);
 
+        const confidence = Number(row.confidence ?? NaN);
+        const preMarketHome = linkedGame ? getPreMarketHomeProb(linkedGame) : 0.5;
+        const fallbackQuality = computeBetQualityFallback({
+          preMarketHome,
+          marketEdgePick: row.market_edge_pick,
+          marketEdgePickRaw: row.market_edge_pick_raw,
+          confidence: Number.isFinite(confidence) ? confidence : 0,
+          uncertaintyLevel: String(row.uncertainty_level ?? "low"),
+          uncertaintyMultiplier: Number(row.uncertainty_edge_multiplier ?? 1),
+          bandHalf: row.home_win_prob_band_half,
+          marketAvailable: marketPickProb !== null,
+        });
+
+        const rawQualityScore = Number(row.bet_quality_score ?? NaN);
+        const betQualityScore = Number.isFinite(rawQualityScore) ? rawQualityScore : fallbackQuality.score;
+        const betQualityGrade = row.bet_quality_grade ? formatBetQualityGrade(row.bet_quality_grade) : fallbackQuality.grade;
+        const betQualityActionable = row.bet_quality_actionable === undefined || row.bet_quality_actionable === null
+          ? Boolean(fallbackQuality.actionable)
+          : Boolean(row.bet_quality_actionable);
+
+        const linkedDelta = linkedGame ?? {};
+        const pick = (key) => (row[key] === undefined || row[key] === null ? linkedDelta[key] : row[key]);
+
         return {
           matchup_id: matchupId,
           away_team: row.away_team,
@@ -671,18 +791,23 @@ function buildValueFinderRows(snapshot) {
           home_win_prob_band_high: row.home_win_prob_band_high === null || row.home_win_prob_band_high === undefined ? null : Number(row.home_win_prob_band_high),
           home_win_prob_band_half: row.home_win_prob_band_half === null || row.home_win_prob_band_half === undefined ? null : Number(row.home_win_prob_band_half),
           uncertainty_note: row.uncertainty_note ?? null,
-          confidence: Number(row.confidence ?? NaN),
+          confidence,
           value_tier: row.value_tier ?? computeValueTier(row.market_edge_pick),
           is_market_upset: Boolean(row.is_market_upset),
           market_available: marketPickProb !== null,
+          bet_quality_score: betQualityScore,
+          bet_quality_grade: betQualityGrade,
+          bet_quality_actionable: betQualityActionable,
+          delta_source_date: pick("delta_source_date") ?? null,
+          delta_days: numberOrNull(pick("delta_days")),
+          delta_home_win_prob: numberOrNull(pick("delta_home_win_prob")),
+          delta_pre_market_home_win_prob: numberOrNull(pick("delta_pre_market_home_win_prob")),
+          delta_model_home_win_prob: numberOrNull(pick("delta_model_home_win_prob")),
+          delta_market_home_win_prob: numberOrNull(pick("delta_market_home_win_prob")),
+          delta_favored_team_changed: pick("delta_favored_team_changed") === null || pick("delta_favored_team_changed") === undefined ? null : Boolean(pick("delta_favored_team_changed")),
         };
       })
-      .sort((a, b) => {
-        const edgeA = a.market_edge_pick === null ? -1 : Math.abs(Number(a.market_edge_pick));
-        const edgeB = b.market_edge_pick === null ? -1 : Math.abs(Number(b.market_edge_pick));
-        if (edgeA !== edgeB) return edgeB - edgeA;
-        return Number(b.confidence || 0) - Number(a.confidence || 0);
-      });
+      .sort(sortValueFinderRows);
   }
 
   return matchupGames
@@ -715,6 +840,18 @@ function buildValueFinderRows(snapshot) {
         ? null
         : (game.market_favored_team ?? (marketHome >= 0.5 ? homeTeam : awayTeam));
 
+      const confidence = Math.abs(homeProb - 0.5) * 2;
+      const fallbackQuality = computeBetQualityFallback({
+        preMarketHome,
+        marketEdgePick: marketEdgePick,
+        marketEdgePickRaw: game.model_vs_market_edge_pick === null || game.model_vs_market_edge_pick === undefined ? marketEdgePick : Number(game.model_vs_market_edge_pick),
+        confidence,
+        uncertaintyLevel: String(game.uncertainty_level ?? "low"),
+        uncertaintyMultiplier: Number(game.uncertainty_edge_multiplier ?? 1),
+        bandHalf: game.home_win_prob_band_half,
+        marketAvailable: marketPickProb !== null,
+      });
+
       return {
         matchup_id: getMatchupId(game),
         away_team: awayTeam,
@@ -732,19 +869,24 @@ function buildValueFinderRows(snapshot) {
         home_win_prob_band_high: game.home_win_prob_band_high === null || game.home_win_prob_band_high === undefined ? null : Number(game.home_win_prob_band_high),
         home_win_prob_band_half: game.home_win_prob_band_half === null || game.home_win_prob_band_half === undefined ? null : Number(game.home_win_prob_band_half),
         uncertainty_note: game.uncertainty_note ?? null,
-        confidence: Math.abs(homeProb - 0.5) * 2,
+        confidence,
         value_tier: game.value_tier ?? computeValueTier(marketEdgePick),
         is_market_upset: Boolean(marketFavTeam && marketFavTeam !== modelPickTeam),
         market_available: marketPickProb !== null,
+        bet_quality_score: fallbackQuality.score,
+        bet_quality_grade: fallbackQuality.grade,
+        bet_quality_actionable: fallbackQuality.actionable,
+        delta_source_date: game.delta_source_date ?? null,
+        delta_days: numberOrNull(game.delta_days),
+        delta_home_win_prob: numberOrNull(game.delta_home_win_prob),
+        delta_pre_market_home_win_prob: numberOrNull(game.delta_pre_market_home_win_prob),
+        delta_model_home_win_prob: numberOrNull(game.delta_model_home_win_prob),
+        delta_market_home_win_prob: numberOrNull(game.delta_market_home_win_prob),
+        delta_favored_team_changed: game.delta_favored_team_changed === null || game.delta_favored_team_changed === undefined ? null : Boolean(game.delta_favored_team_changed),
       };
     })
     .filter(Boolean)
-    .sort((a, b) => {
-      const edgeA = a.market_edge_pick === null ? -1 : Math.abs(Number(a.market_edge_pick));
-      const edgeB = b.market_edge_pick === null ? -1 : Math.abs(Number(b.market_edge_pick));
-      if (edgeA !== edgeB) return edgeB - edgeA;
-      return Number(b.confidence || 0) - Number(a.confidence || 0);
-    });
+    .sort(sortValueFinderRows);
 }
 
 function buildWhyPickRows(game) {
@@ -755,11 +897,24 @@ function buildWhyPickRows(game) {
   const orient = (value) => (favorsHome ? Number(value) : -Number(value));
 
   const modelHome = Number(game?.model_home_win_prob ?? game?.home_win_prob ?? 0.5);
+  const rawCandidate = Number(game?.model_home_win_prob_raw);
+  const modelHomeRaw = Number.isFinite(rawCandidate) ? rawCandidate : null;
+  const explicitHomePriorAdj = Number(game?.home_prior_neutralization);
+  const homePriorAdj = Number.isFinite(explicitHomePriorAdj)
+    ? explicitHomePriorAdj
+    : (modelHomeRaw === null ? 0 : (modelHome - modelHomeRaw));
   const preMarketHome = getPreMarketHomeProb(game);
   const finalHome = clampProb(Number(game?.home_win_prob ?? preMarketHome));
 
+  const baseRows = modelHomeRaw === null
+    ? [{ label: "Base Model", value: orient(modelHome - 0.5) }]
+    : [
+        { label: "Base Model (Raw)", value: orient(modelHomeRaw - 0.5) },
+        { label: "Home Prior Neutralization", value: orient(homePriorAdj) },
+      ];
+
   const rows = [
-    { label: "Base Model", value: orient(modelHome - 0.5) },
+    ...baseRows,
     ...buildMatchupComponentRows(game).map((row) => ({ label: row.label, value: orient(row.value) })),
   ];
 
@@ -781,12 +936,58 @@ function buildWhyPickRows(game) {
     .slice(0, 5);
 }
 
+function buildMatchupDeltaRows(game) {
+  const keys = [
+    { label: "Final Home", key: "delta_home_win_prob" },
+    { label: "Pre-Market Home", key: "delta_pre_market_home_win_prob" },
+    { label: "Model Home", key: "delta_model_home_win_prob" },
+    { label: "Market Home", key: "delta_market_home_win_prob" },
+    { label: "Starter", key: "delta_starter_adjustment" },
+    { label: "Split", key: "delta_split_adjustment" },
+    { label: "Bullpen Core", key: "delta_bullpen_adjustment" },
+    { label: "Bullpen Health", key: "delta_bullpen_health_adjustment" },
+    { label: "Lineup Core", key: "delta_lineup_adjustment" },
+    { label: "Lineup Health", key: "delta_lineup_health_adjustment" },
+    { label: "Travel", key: "delta_travel_adjustment" },
+    { label: "Luck/Regression", key: "delta_luck_adjustment" },
+    { label: "Expected Quality", key: "delta_advanced_adjustment" },
+  ];
+
+  const rows = keys
+    .map((entry) => {
+      const raw = numberOrNull(game?.[entry.key]);
+      if (raw === null) {
+        return null;
+      }
+      return {
+        label: entry.label,
+        value: raw,
+        magnitude: Math.abs(raw),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => Number(b.magnitude) - Number(a.magnitude))
+    .slice(0, 8);
+
+  const daysRaw = numberOrNull(game?.delta_days);
+  return {
+    rows,
+    sourceDate: game?.delta_source_date ?? null,
+    days: (daysRaw !== null && daysRaw > 0) ? daysRaw : null,
+    favoredChanged: game?.delta_favored_team_changed === null || game?.delta_favored_team_changed === undefined
+      ? null
+      : Boolean(game.delta_favored_team_changed),
+  };
+}
+
 function buildAdvancedWaterfallRows(game) {
   const parts = [
     { label: "Expected Offense", value: Number(game?.advanced_offense_edge ?? 0) },
     { label: "Expected Pitching", value: Number(game?.advanced_pitching_edge ?? 0) },
     { label: "xwOBAcon Edge", value: Number(game?.advanced_xwobacon_edge ?? 0) },
     { label: "xFIP Edge", value: Number(game?.advanced_xfip_edge ?? 0) },
+    { label: "Leverage Quality", value: Number(game?.advanced_leverage_edge ?? 0) },
+    { label: "Clutch Execution", value: Number(game?.advanced_clutch_edge ?? 0) },
   ];
 
   let cumulative = 0;
@@ -828,6 +1029,12 @@ function makeMatchupStatRows(homeTeam, awayTeam, game) {
     { label: "SLG", home: formatNumber(getTeamMlbValue(homeTeam, "mlb::season::hitting::slg"), 3), away: formatNumber(getTeamMlbValue(awayTeam, "mlb::season::hitting::slg"), 3) },
     { label: "xwOBAcon Proxy", home: formatNumber(getTeamLiveValue(homeTeam, "xwobacon_proxy") ?? game?.home_xwobacon_proxy, 3), away: formatNumber(getTeamLiveValue(awayTeam, "xwobacon_proxy") ?? game?.away_xwobacon_proxy, 3) },
     { label: "xFIP Proxy", home: formatNumber(getTeamLiveValue(homeTeam, "xfip_proxy") ?? game?.home_xfip_proxy, 3), away: formatNumber(getTeamLiveValue(awayTeam, "xfip_proxy") ?? game?.away_xfip_proxy, 3) },
+    { label: "OPS (RISP)", home: formatNumber(getTeamLiveValue(homeTeam, "hitting_ops_risp"), 3), away: formatNumber(getTeamLiveValue(awayTeam, "hitting_ops_risp"), 3) },
+    { label: "OPS (RISP,2 Out)", home: formatNumber(getTeamLiveValue(homeTeam, "hitting_ops_risp2"), 3), away: formatNumber(getTeamLiveValue(awayTeam, "hitting_ops_risp2"), 3) },
+    { label: "OPS (Late/Close)", home: formatNumber(getTeamLiveValue(homeTeam, "hitting_ops_late_close"), 3), away: formatNumber(getTeamLiveValue(awayTeam, "hitting_ops_late_close"), 3) },
+    { label: "Opp OPS (Late/Close)", home: formatNumber(getTeamLiveValue(homeTeam, "pitching_ops_late_close_allowed"), 3), away: formatNumber(getTeamLiveValue(awayTeam, "pitching_ops_late_close_allowed"), 3) },
+    { label: "Leverage Net", home: formatNumber(getTeamLiveValue(homeTeam, "leverage_net_quality") ?? game?.home_leverage_net_quality, 1), away: formatNumber(getTeamLiveValue(awayTeam, "leverage_net_quality") ?? game?.away_leverage_net_quality, 1) },
+    { label: "Clutch Index", home: formatNumber(getTeamLiveValue(homeTeam, "clutch_index") ?? game?.home_clutch_index, 1), away: formatNumber(getTeamLiveValue(awayTeam, "clutch_index") ?? game?.away_clutch_index, 1) },
     { label: "Joe Score", home: formatNumber(getTeamLiveValue(homeTeam, "joe_score"), 2), away: formatNumber(getTeamLiveValue(awayTeam, "joe_score"), 2) },
     { label: "Joe Band", home: `${formatNumber(getTeamLiveValue(homeTeam, "joe_band_low"), 1)}-${formatNumber(getTeamLiveValue(homeTeam, "joe_band_high"), 1)}`, away: `${formatNumber(getTeamLiveValue(awayTeam, "joe_band_low"), 1)}-${formatNumber(getTeamLiveValue(awayTeam, "joe_band_high"), 1)}` },
     { label: "Joe Confidence", home: isNumeric(getTeamLiveValue(homeTeam, "joe_confidence")) ? `${formatNumber(getTeamLiveValue(homeTeam, "joe_confidence"), 1)}%` : "-", away: isNumeric(getTeamLiveValue(awayTeam, "joe_confidence")) ? `${formatNumber(getTeamLiveValue(awayTeam, "joe_confidence"), 1)}%` : "-" },
@@ -890,6 +1097,10 @@ function renderMatchupSidebar(snapshot) {
   const finalHome = clampProb(Number(game.home_win_prob ?? preMarketHome));
   const marketImpact = finalHome - preMarketHome;
 
+  const deltaRowsData = buildMatchupDeltaRows(game);
+  const deltaSummary = numberOrNull(game?.delta_home_win_prob);
+  const hasDeltaSummary = deltaSummary !== null;
+
   const modelImportanceRows = (snapshot.model_diagnostics?.win_model?.feature_importance ?? [])
     .slice(0, 6)
     .map(
@@ -946,6 +1157,18 @@ function renderMatchupSidebar(snapshot) {
     })
     .join("");
 
+  const deltaRows = deltaRowsData.rows
+    .map((row) => {
+      const value = Number(row.value ?? 0);
+      return `
+      <div class="matchup-weight-row">
+        <span>${safeText(row.label)}</span>
+        <strong class="${value >= 0 ? "delta-up" : "delta-down"}">${safeText(formatSignedPctPoints(value))}</strong>
+      </div>
+      `;
+    })
+    .join("");
+
   const advancedWaterfallRowsData = buildAdvancedWaterfallRows(game);
   const advancedScale = Math.max(
     0.01,
@@ -953,10 +1176,10 @@ function renderMatchupSidebar(snapshot) {
   );
   const advancedWaterfallRows = advancedWaterfallRowsData
     .map((row) => {
-      const start = Number(row.start ?? 0);
-      const end = Number(row.end ?? 0);
-      const startPct = 50 + ((start / advancedScale) * 45);
-      const endPct = 50 + ((end / advancedScale) * 45);
+      const startVal = Number(row.start ?? 0);
+      const endVal = Number(row.end ?? 0);
+      const startPct = 50 + ((startVal / advancedScale) * 45);
+      const endPct = 50 + ((endVal / advancedScale) * 45);
       const left = Math.max(1, Math.min(startPct, endPct));
       const width = Math.max(2, Math.abs(endPct - startPct));
       const value = Number(row.value ?? 0);
@@ -976,6 +1199,17 @@ function renderMatchupSidebar(snapshot) {
     })
     .join("");
 
+  const deltaMetaParts = [];
+  if (deltaRowsData.sourceDate) {
+    deltaMetaParts.push(`Source ${deltaRowsData.sourceDate}`);
+  }
+  if (Number.isFinite(deltaRowsData.days)) {
+    deltaMetaParts.push(`${deltaRowsData.days} day lookback`);
+  }
+  if (deltaRowsData.favoredChanged) {
+    deltaMetaParts.push("Favored team changed");
+  }
+
   matchupSidebarTitle.textContent = `${game.away_team} @ ${game.home_team}`;
   matchupSidebarSubtitle.textContent = `${favoredTeam} favored ${formatPercent(favoredProb, 1)} | click another matchup to compare.`;
 
@@ -986,12 +1220,19 @@ function renderMatchupSidebar(snapshot) {
       <p><strong>Pre-Market Home:</strong> ${safeText(formatPercent(preMarketHome, 1))}</p>
       <p><strong>Market Impact:</strong> ${safeText(formatSignedPctPoints(marketImpact))}</p>
       <p><strong>Final Home:</strong> ${safeText(formatPercent(finalHome, 1))}</p>
+      ${hasDeltaSummary ? `<p><strong>Delta Final:</strong> <span class="${deltaSummary >= 0 ? "delta-up" : "delta-down"}">${safeText(formatSignedPctPoints(deltaSummary))}</span>${deltaRowsData.sourceDate ? ` <span class="muted-note">vs ${safeText(deltaRowsData.sourceDate)}</span>` : ""}</p>` : ""}
       <p class="muted-note">${safeText(game.away_probable_pitcher ?? "TBD")} vs ${safeText(game.home_probable_pitcher ?? "TBD")}</p>
     </article>
 
     <section class="matchup-section">
       <h4>Why This Pick</h4>
       <div class="why-pick-list">${whyRows || "<p class='muted-note'>No contribution breakdown available.</p>"}</div>
+    </section>
+
+    <section class="matchup-section">
+      <h4>What Changed${deltaRowsData.sourceDate ? ` (vs ${safeText(deltaRowsData.sourceDate)})` : ""}</h4>
+      <p class="muted-note">${safeText(deltaMetaParts.length ? deltaMetaParts.join(" | ") : "No archived prior matchup values available yet.")}</p>
+      <div class="matchup-weight-list">${deltaRows || "<p class='muted-note'>No delta rows available for this matchup yet.</p>"}</div>
     </section>
 
     <section class="matchup-section">
@@ -1034,6 +1275,19 @@ function sanitizeFilePart(value) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
   return slug || "team";
+}
+
+function compactDateStamp(dateObj = new Date()) {
+  const d = dateObj instanceof Date ? dateObj : new Date(dateObj);
+  if (Number.isNaN(d.getTime())) {
+    return "unknown";
+  }
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${mi}`;
 }
 
 function truncateCanvasText(ctx, text, maxWidth) {
@@ -1099,6 +1353,10 @@ function resolveRrgMetricKey(metricRaw) {
     dplus: "d_plus_score",
     d_plus: "d_plus_score",
     "d+": "d_plus_score",
+    joe: "joe_score",
+    joe_score: "joe_score",
+    leverage: "leverage_net_quality",
+    clutch: "clutch_index",
     gap: "power_minus_d_plus",
     power_minus: "power_minus_d_plus",
     power_minus_d_plus: "power_minus_d_plus",
@@ -1106,8 +1364,8 @@ function resolveRrgMetricKey(metricRaw) {
   return alias[metric] || "live_power_score";
 }
 
-function getRrgParamsFromState() {
-  const metric = state.rrgMetric || "power";
+function getRrgParamsFromState(metricOverride = null) {
+  const metric = metricOverride || state.rrgMetric || "power";
   const lookback = Math.max(30, Math.min(365, Number(state.rrgLookback || 120)));
   const trail = Math.max(3, Math.min(45, Number(state.rrgTrail || 7)));
   const minPoints = Math.max(4, Math.min(60, Math.floor(trail / 2) + 2));
@@ -1704,6 +1962,174 @@ function parseOptionalNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function rrgMetricDisplayName(metricRaw) {
+  const key = resolveRrgMetricKey(metricRaw);
+  const labels = {
+    live_power_score: "Power Score",
+    d_plus_score: "D+ Score",
+    joe_score: "Joe Score",
+  };
+  return labels[key] || String(key || "Metric").replaceAll("_", " ");
+}
+
+function buildMomentumLeaders(points, direction) {
+  const rows = (points ?? [])
+    .map((row) => {
+      const momentum = Number(row?.y);
+      if (!Number.isFinite(momentum)) {
+        return null;
+      }
+      return {
+        team: String(row?.team ?? ""),
+        momentum,
+        delta: momentum - 100,
+      };
+    })
+    .filter(Boolean)
+    .filter((row) => row.team);
+
+  rows.sort((a, b) => {
+    if (direction === "improving") {
+      if (b.momentum !== a.momentum) return b.momentum - a.momentum;
+      return a.team.localeCompare(b.team);
+    }
+    if (a.momentum !== b.momentum) return a.momentum - b.momentum;
+    return a.team.localeCompare(b.team);
+  });
+
+  return rows.slice(0, 5);
+}
+
+function renderMomentumLeaderList(rows) {
+  if (!rows.length) {
+    return `<p class="rrg-momentum-empty">No teams available.</p>`;
+  }
+
+  return `
+    <ol class="rrg-momentum-list">
+      ${rows
+        .map((row) => {
+          const deltaClass = row.delta >= 0 ? "up" : "down";
+          const deltaText = row.delta >= 0 ? `+${row.delta.toFixed(2)}` : row.delta.toFixed(2);
+          return `
+            <li class="rrg-momentum-item">
+              <span class="rrg-momentum-team">${safeText(row.team)}</span>
+              <span class="rrg-momentum-value">${row.momentum.toFixed(2)}<span class="rrg-momentum-delta ${deltaClass}">${safeText(deltaText)}</span></span>
+            </li>
+          `;
+        })
+        .join("")}
+    </ol>
+  `;
+}
+
+function renderRrgMomentumLeaders(boards, options = {}) {
+  if (!rrgMomentumBoards || !rrgMomentumNote) {
+    return;
+  }
+
+  const validBoards = Array.isArray(boards) ? boards.filter((row) => row && !row.error) : [];
+  if (!validBoards.length) {
+    state.rrgMomentumLeaders = [];
+    state.rrgMomentumMeta = null;
+    rrgMomentumBoards.innerHTML = `<p class="muted-note">Momentum leaders are unavailable right now.</p>`;
+    rrgMomentumNote.textContent = options.message || "Could not load momentum leader data.";
+    if (rrgMomentumExportPngBtn) {
+      rrgMomentumExportPngBtn.disabled = true;
+    }
+    return;
+  }
+
+  const preparedBoards = validBoards.map((board) => {
+    const title = rrgMetricDisplayName(board.metric);
+    const improving = buildMomentumLeaders(board.points, "improving");
+    const regressing = buildMomentumLeaders(board.points, "regressing");
+    return {
+      metric: board.metric,
+      metricKey: resolveRrgMetricKey(board.metric),
+      title,
+      improving,
+      regressing,
+    };
+  });
+
+  state.rrgMomentumLeaders = preparedBoards;
+  state.rrgMomentumMeta = {
+    lookback: Number(options.lookback ?? state.rrgLookback ?? 120),
+    trail: Number(options.trail ?? state.rrgTrail ?? 7),
+    generatedAt: new Date().toISOString(),
+  };
+
+  rrgMomentumBoards.innerHTML = preparedBoards
+    .map((board) => `
+        <article class="rrg-momentum-card">
+          <h4>${safeText(board.title)}</h4>
+          <div class="rrg-momentum-columns">
+            <div class="rrg-momentum-col">
+              <h5>Most Improving</h5>
+              ${renderMomentumLeaderList(board.improving)}
+            </div>
+            <div class="rrg-momentum-col">
+              <h5>Most Regressing</h5>
+              ${renderMomentumLeaderList(board.regressing)}
+            </div>
+          </div>
+        </article>
+      `)
+    .join("");
+
+  const lookback = state.rrgMomentumMeta.lookback;
+  const trail = state.rrgMomentumMeta.trail;
+  rrgMomentumNote.textContent = `Based on RS-Momentum with ${lookback}d lookback and ${trail}d trail settings.`;
+  if (rrgMomentumExportPngBtn) {
+    rrgMomentumExportPngBtn.disabled = false;
+  }
+}
+
+async function loadRrgMomentumLeaders(primaryPayload = null, primaryMetric = null) {
+  if (!rrgMomentumBoards || !rrgMomentumNote) {
+    return;
+  }
+
+  const targets = ["power", "dplus", "joe"];
+  const payloadByMetric = {};
+  if (primaryPayload && targets.includes(String(primaryMetric || ""))) {
+    payloadByMetric[String(primaryMetric)] = primaryPayload;
+  }
+
+  const fetchTargets = targets.filter((metric) => !payloadByMetric[metric]);
+
+  const results = await Promise.allSettled(
+    fetchTargets.map(async (metric) => {
+      const { params } = getRrgParamsFromState(metric);
+      const response = await fetch(`/api/rrg?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`RRG request failed (${response.status})`);
+      }
+      const payload = await response.json();
+      return { metric, payload };
+    }),
+  );
+
+  const boards = [];
+  for (const metric of targets) {
+    const existing = payloadByMetric[metric];
+    if (existing) {
+      boards.push({ metric, points: existing.points ?? [] });
+      continue;
+    }
+    const matched = results.find((entry) => entry.status === "fulfilled" && entry.value?.metric === metric);
+    if (matched && matched.status === "fulfilled") {
+      boards.push({ metric, points: matched.value.payload?.points ?? [] });
+    }
+  }
+
+  renderRrgMomentumLeaders(boards, {
+    lookback: Number(state.rrgLookback || 120),
+    trail: Number(state.rrgTrail || 7),
+  });
+}
+
 function renderRrg(payload) {
   if (!rrgSvg || !rrgLegend || !rrgValidation) {
     return;
@@ -1914,6 +2340,211 @@ function renderRrg(payload) {
   rrgValidation.textContent = `${trailInfo}${limitedTrailNote}${historyNote}${axisNote}Out-of-sample lens (${val.horizon_days ?? 7}d): Leading entries hit ${leadHit} (n=${val.leading_entries ?? 0}, excess ${leadEx}); Improving entries hit ${impHit} (n=${val.improving_entries ?? 0}, excess ${impEx}).`;
 }
 
+function exportRrgMomentumSheetAsPng() {
+  const boards = Array.isArray(state.rrgMomentumLeaders) ? state.rrgMomentumLeaders : [];
+  if (!boards.length) {
+    setError("Momentum sheet export unavailable until leader lists are loaded.");
+    return;
+  }
+
+  if (rrgMomentumExportPngBtn) {
+    rrgMomentumExportPngBtn.disabled = true;
+  }
+
+  const pageWidth = 2550;
+  const pageHeight = 3300;
+  const margin = 120;
+  const contentWidth = pageWidth - margin * 2;
+  const panelGap = 36;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = pageWidth;
+  canvas.height = pageHeight;
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    setError("Momentum sheet export failed: could not create canvas context.");
+    if (rrgMomentumExportPngBtn) {
+      rrgMomentumExportPngBtn.disabled = false;
+    }
+    return;
+  }
+
+  const g = ctx.createLinearGradient(0, 0, 0, pageHeight);
+  g.addColorStop(0, "#f7fbff");
+  g.addColorStop(1, "#eef6ff");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, pageWidth, pageHeight);
+
+  const now = new Date();
+  const generated = now.toLocaleString();
+  const lookback = Number(state?.rrgMomentumMeta?.lookback ?? state.rrgLookback ?? 120);
+  const trail = Number(state?.rrgMomentumMeta?.trail ?? state.rrgTrail ?? 7);
+
+  let y = margin;
+
+  ctx.fillStyle = "#183a56";
+  ctx.font = "700 66px 'Segoe UI', Arial, sans-serif";
+  ctx.fillText("MLB RS-Momentum Leaders Sheet", margin, y);
+  y += 72;
+
+  ctx.fillStyle = "#355972";
+  ctx.font = "500 30px 'Segoe UI', Arial, sans-serif";
+  ctx.fillText(`Generated ${generated} | Lookback ${lookback}d | Trail ${trail}d`, margin, y);
+  y += 54;
+
+  ctx.strokeStyle = "#c8dbee";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(margin, y);
+  ctx.lineTo(pageWidth - margin, y);
+  ctx.stroke();
+  y += 34;
+
+  ctx.fillStyle = "#244761";
+  ctx.font = "700 38px 'Segoe UI', Arial, sans-serif";
+  ctx.fillText("What Each Score Represents", margin, y);
+  y += 44;
+
+  const explanations = [
+    {
+      title: "Power Score",
+      text: "Context-adjusted team strength score. Starts from Mscore and applies talent, form, risk, and context overlays (including leverage/clutch and coaching when signal is meaningful).",
+    },
+    {
+      title: "D+ Score",
+      text: "Balanced base/offense/defense/context model with extra emphasis on pitching quality and pitching health. Useful for baseline team quality and run-prevention consistency.",
+    },
+    {
+      title: "Joe Score",
+      text: "Fixed 45/40/15 blend: xwOBAcon quality (45%), inverse xFIP quality (40%), and clutch execution signal (15%), with reliability shrinkage and uncertainty control.",
+    },
+    {
+      title: "RS-Momentum",
+      text: "Relative momentum lens from the RRG engine. Values above 100 indicate improving relative momentum; below 100 indicate regressing relative momentum.",
+    },
+  ];
+
+  ctx.fillStyle = "#2f516a";
+  for (const row of explanations) {
+    ctx.font = "700 28px 'Segoe UI', Arial, sans-serif";
+    ctx.fillText(`${row.title}:`, margin, y);
+    y += 34;
+    ctx.font = "500 25px 'Segoe UI', Arial, sans-serif";
+    y = drawWrappedCanvasText(ctx, row.text, margin + 10, y, contentWidth - 20, 34, 3);
+    y += 12;
+  }
+
+  y += 18;
+
+  const cardWidth = Math.floor((contentWidth - panelGap * 2) / 3);
+  const cardHeight = 1450;
+  const listStartY = 220;
+  const lineStep = 48;
+
+  const scoreOrder = ["live_power_score", "d_plus_score", "joe_score"];
+  const scoreRank = Object.fromEntries(scoreOrder.map((k, i) => [k, i]));
+  const orderedBoards = [...boards].sort((a, b) => {
+    const ar = scoreRank[a.metricKey] ?? 99;
+    const br = scoreRank[b.metricKey] ?? 99;
+    return ar - br;
+  });
+
+  for (let i = 0; i < orderedBoards.length; i += 1) {
+    const board = orderedBoards[i];
+    const x = margin + i * (cardWidth + panelGap);
+    const cardY = y;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "#ccddef";
+    ctx.lineWidth = 2;
+    ctx.fillRect(x, cardY, cardWidth, cardHeight);
+    ctx.strokeRect(x, cardY, cardWidth, cardHeight);
+
+    ctx.fillStyle = "#1f4461";
+    ctx.font = "700 34px 'Segoe UI', Arial, sans-serif";
+    ctx.fillText(board.title || "Score", x + 24, cardY + 52);
+
+    ctx.fillStyle = "#d9e8f5";
+    ctx.fillRect(x + 20, cardY + 76, cardWidth - 40, 2);
+
+    let iy = cardY + listStartY;
+    ctx.fillStyle = "#35617b";
+    ctx.font = "700 24px 'Segoe UI', Arial, sans-serif";
+    ctx.fillText("Most Improving", x + 24, iy - 28);
+
+    ctx.font = "600 23px 'Segoe UI', Arial, sans-serif";
+    for (let rank = 0; rank < 5; rank += 1) {
+      const row = board.improving?.[rank];
+      const yy = iy + rank * lineStep;
+      if (!row) {
+        ctx.fillStyle = "#8aa0b3";
+        ctx.fillText(`${rank + 1}. -`, x + 24, yy);
+        continue;
+      }
+      ctx.fillStyle = "#2a4a63";
+      const name = truncateCanvasText(ctx, `${rank + 1}. ${row.team}`, cardWidth - 220);
+      ctx.fillText(name, x + 24, yy);
+      const delta = Number(row.delta ?? (Number(row.momentum) - 100));
+      const deltaText = Number.isFinite(delta) ? (delta >= 0 ? `+${delta.toFixed(2)}` : delta.toFixed(2)) : "0.00";
+      ctx.fillStyle = "#0f8f63";
+      ctx.textAlign = "right";
+      ctx.fillText(`${Number(row.momentum).toFixed(2)} (${deltaText})`, x + cardWidth - 24, yy);
+      ctx.textAlign = "left";
+    }
+
+    iy = cardY + listStartY + 370;
+    ctx.fillStyle = "#35617b";
+    ctx.font = "700 24px 'Segoe UI', Arial, sans-serif";
+    ctx.fillText("Most Regressing", x + 24, iy - 28);
+
+    ctx.font = "600 23px 'Segoe UI', Arial, sans-serif";
+    for (let rank = 0; rank < 5; rank += 1) {
+      const row = board.regressing?.[rank];
+      const yy = iy + rank * lineStep;
+      if (!row) {
+        ctx.fillStyle = "#8aa0b3";
+        ctx.fillText(`${rank + 1}. -`, x + 24, yy);
+        continue;
+      }
+      ctx.fillStyle = "#2a4a63";
+      const name = truncateCanvasText(ctx, `${rank + 1}. ${row.team}`, cardWidth - 220);
+      ctx.fillText(name, x + 24, yy);
+      const delta = Number(row.delta ?? (Number(row.momentum) - 100));
+      const deltaText = Number.isFinite(delta) ? (delta >= 0 ? `+${delta.toFixed(2)}` : delta.toFixed(2)) : "0.00";
+      ctx.fillStyle = "#a1482e";
+      ctx.textAlign = "right";
+      ctx.fillText(`${Number(row.momentum).toFixed(2)} (${deltaText})`, x + cardWidth - 24, yy);
+      ctx.textAlign = "left";
+    }
+  }
+
+  ctx.fillStyle = "#5a7389";
+  ctx.font = "500 24px 'Segoe UI', Arial, sans-serif";
+  ctx.fillText("Note: Momentum values are relative (centered around 100) and derived from the same RRG methodology used in-app.", margin, pageHeight - margin + 8);
+
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      setError("Momentum sheet export failed.");
+      if (rrgMomentumExportPngBtn) {
+        rrgMomentumExportPngBtn.disabled = false;
+      }
+      return;
+    }
+
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    const stamp = compactDateStamp(now);
+    link.href = url;
+    link.download = `momentum-leaders-sheet-${stamp}.png`;
+    link.click();
+    URL.revokeObjectURL(url);
+    if (rrgMomentumExportPngBtn) {
+      rrgMomentumExportPngBtn.disabled = false;
+    }
+  }, "image/png");
+}
+
 function exportAdvancedScatterAsPng() {
   if (!advancedScatterSvg || !advancedScatterSvg.innerHTML.trim()) {
     setError("Advanced chart export unavailable until the xFIP vs xwOBAcon chart is loaded.");
@@ -2081,7 +2712,9 @@ async function loadRrgData() {
     syncRrgTeamSelection(payload);
     renderRrgTeamSelector();
     renderRrg(payload);
+    await loadRrgMomentumLeaders(payload, metric);
   } catch (error) {
+    renderRrgMomentumLeaders([], { message: "RRG unavailable." });
     rrgSvg.innerHTML = `<text x="24" y="42" fill="#a63d2b" font-size="15">Could not load RRG data: ${safeText(error.message)}</text>`;
     if (rrgValidation) {
       rrgValidation.textContent = "RRG unavailable.";
@@ -2101,6 +2734,7 @@ function renderSummary(snapshot) {
     { label: "Live / Upcoming", value: formatNumber(summary.live_games_today) },
     { label: "Market Matchups", value: formatNumber(summary.market_matchups_today) },
     { label: "Actionable Value", value: formatNumber(summary.actionable_value_spots) },
+    { label: "High Quality (A)", value: formatNumber(summary.high_quality_value_spots) },
   ];
 
   summaryCards.innerHTML = cards
@@ -2242,6 +2876,11 @@ function renderPredictions(snapshot) {
   if (cal.ece !== undefined && cal.ece !== null) {
     metricParts.push(`ECE ${(Number(cal.ece) * 100).toFixed(1)}%`);
   }
+  const homeBaseRate = Number(model.home_prior_base_rate);
+  const homeNeutralizeStrength = Number(model.home_prior_neutralize_strength ?? 0);
+  if (Number.isFinite(homeBaseRate) && homeNeutralizeStrength > 0) {
+    metricParts.push(`Home Prior ${formatPercent(homeBaseRate, 1)} x ${formatNumber(homeNeutralizeStrength, 2)}`);
+  }
 
   const metricLine = metricParts.length
     ? `<p class="muted-note">Backtest ${safeText(model.season ?? "")} (${safeText(model.model_variant ?? "v4")}): ${safeText(metricParts.join(" | "))}</p>`
@@ -2251,6 +2890,15 @@ function renderPredictions(snapshot) {
     .map((game) => {
       const favoredProb = Number(game.favored_win_prob ?? 0.5);
       const modelHome = Number(game.model_home_win_prob ?? game.home_win_prob ?? 0.5);
+      const rawCandidate = Number(game.model_home_win_prob_raw);
+      const modelHomeRaw = Number.isFinite(rawCandidate) ? rawCandidate : null;
+      const explicitHomePriorAdj = Number(game.home_prior_neutralization);
+      const homePriorAdj = Number.isFinite(explicitHomePriorAdj)
+        ? explicitHomePriorAdj
+        : (modelHomeRaw === null ? 0 : (modelHome - modelHomeRaw));
+      const modelText = modelHomeRaw === null
+        ? `Model H ${formatPercent(modelHome, 1)}`
+        : `Model H ${formatPercent(modelHome, 1)} (raw ${formatPercent(modelHomeRaw, 1)} | prior ${formatSignedPctPoints(homePriorAdj)})`;
       const starterAdj = Number(game.starter_adjustment ?? 0);
       const splitAdj = Number(game.split_adjustment ?? 0);
       const bullpenAdj = Number(game.bullpen_adjustment ?? 0);
@@ -2282,7 +2930,7 @@ function renderPredictions(snapshot) {
           <span>${safeText(game.favored_team)} ${safeText(formatPercent(favoredProb, 1))}</span>
         </div>
         <div class="bar-meta">
-          <span class="muted-note">Model H ${safeText(formatPercent(modelHome, 1))} | ${safeText(adjText)}${safeText(marketText)}</span>
+          <span class="muted-note">${safeText(modelText)} | ${safeText(adjText)}${safeText(marketText)}</span>
           <span class="muted-note">${safeText(game.away_probable_pitcher ?? "TBD")} vs ${safeText(game.home_probable_pitcher ?? "TBD")}</span>
         </div>
         <div class="bar-meta bar-meta-actions">
@@ -2330,7 +2978,9 @@ function renderValueFinder(snapshot) {
   }
 
   const highUncCount = rows.filter((row) => String(row.uncertainty_level ?? "").toLowerCase() === "high").length;
-  const summary = `<p class="muted-note">${safeText(marketPart)} | Upset calls ${rows.filter((row) => row.is_market_upset).length} | High uncertainty ${safeText(String(highUncCount))}</p>`;
+  const actionableCount = rows.filter((row) => Boolean(row.bet_quality_actionable)).length;
+  const highQualityCount = rows.filter((row) => Number(row.bet_quality_score ?? 0) >= 75).length;
+  const summary = `<p class="muted-note">${safeText(marketPart)} | Actionable ${safeText(String(actionableCount))} | High quality ${safeText(String(highQualityCount))} | Upset calls ${rows.filter((row) => row.is_market_upset).length} | High uncertainty ${safeText(String(highUncCount))}</p>`;
   const setupHint = marketStatus === "disabled_missing_api_key"
     ? `<p class="muted-note">Set <code>MSCORE_ODDS_API_KEY</code> before starting the server to enable true market edge and upset detection.</p>`
     : "";
@@ -2346,20 +2996,44 @@ function renderValueFinder(snapshot) {
         : (Number(edge) > 0 ? "delta-up" : (Number(edge) < 0 ? "delta-down" : "delta-flat"));
       const tier = row.value_tier ?? computeValueTier(edge);
       const tierLabel = formatValueTier(tier);
+      const tierCls = `tier-${safeText(String(tier).toLowerCase())}`;
+
+      const qualityScore = Number(row.bet_quality_score ?? NaN);
+      const qualityGrade = formatBetQualityGrade(row.bet_quality_grade);
+      const qualityLabel = Number.isFinite(qualityScore) ? `${qualityScore.toFixed(1)} ${qualityGrade}` : qualityGrade;
+      const qualityCls = `quality-${safeText(String(qualityGrade).toLowerCase())}`;
+      const qualityTag = `<span class="value-tag ${qualityCls}">Q ${safeText(qualityLabel)}</span>`;
+      const actionableTag = row.bet_quality_actionable ? `<span class="value-tag quality-action">Actionable</span>` : "";
+
       const upsetTag = row.is_market_upset ? `<span class="value-tag upset">Upset</span>` : "";
       const uncLevel = String(row.uncertainty_level ?? "low").toLowerCase();
       const uncTag = uncLevel === "high"
         ? `<span class="value-tag uncertainty-high">High Unc</span>`
         : (uncLevel === "medium" ? `<span class="value-tag uncertainty-med">Med Unc</span>` : "");
-      const tierCls = `tier-${safeText(String(tier).toLowerCase())}`;
 
       const modelOddsText = Number.isFinite(Number(row.model_pick_prob)) ? formatPercent(row.model_pick_prob, 1) : "-";
       const marketOddsText = row.market_pick_prob === null || row.market_pick_prob === undefined ? "N/A" : formatPercent(row.market_pick_prob, 1);
       const finalOddsText = row.final_pick_prob === null || row.final_pick_prob === undefined ? "N/A" : formatPercent(row.final_pick_prob, 1);
       const edgeMeta = edgeRawText && edgeRawText !== edgeText ? ` | Raw ${safeText(edgeRawText)}` : "";
 
+      const deltaFinal = numberOrNull(row.delta_home_win_prob);
+      const deltaPre = numberOrNull(row.delta_pre_market_home_win_prob);
+      const deltaDate = row.delta_source_date ? String(row.delta_source_date) : null;
+      const deltaParts = [];
+      if (Number.isFinite(deltaFinal)) {
+        deltaParts.push(`Final ${formatSignedPctPoints(deltaFinal)}`);
+      }
+      if (Number.isFinite(deltaPre)) {
+        deltaParts.push(`Pre ${formatSignedPctPoints(deltaPre)}`);
+      }
+      const deltaLine = deltaParts.length
+        ? `<p class="value-row-odds muted-note">Delta${deltaDate ? ` vs ${safeText(deltaDate)}` : ""}: ${safeText(deltaParts.join(" | "))}</p>`
+        : "";
+
+      const lowQualityClass = !row.bet_quality_actionable && Number.isFinite(qualityScore) && qualityScore < 45 ? "value-row-pass" : "";
+
       return `
-      <article class="value-row is-clickable ${uncLevel === "high" ? "value-row-high-unc" : ""}" data-matchup-id="${safeText(row.matchup_id)}" role="button" tabindex="0" title="Open matchup breakdown">
+      <article class="value-row is-clickable ${uncLevel === "high" ? "value-row-high-unc" : ""} ${lowQualityClass}" data-matchup-id="${safeText(row.matchup_id)}" role="button" tabindex="0" title="Open matchup breakdown">
         <div class="value-row-top">
           <span>${safeText(row.away_team)} @ ${safeText(row.home_team)}</span>
           <span class="value-tag ${tierCls}">${safeText(tierLabel)}</span>
@@ -2369,9 +3043,10 @@ function renderValueFinder(snapshot) {
           <span class="${edgeClass}">${safeText(edgeText)}</span>
         </div>
         <p class="value-row-odds muted-note">Model (pre): ${safeText(modelOddsText)} | Market: ${safeText(marketOddsText)} | Final: ${safeText(finalOddsText)}${edgeMeta}</p>
+        ${deltaLine}
         <div class="value-row-bot">
           <span class="muted-note">Conf ${safeText(formatPercent(row.confidence ?? 0, 1))}${row.uncertainty_note ? ` | ${safeText(row.uncertainty_note)}` : ""}</span>
-          ${uncTag}${upsetTag}
+          <span class="value-tag-group">${qualityTag}${actionableTag}${uncTag}${upsetTag}</span>
         </div>
       </article>
       `;
@@ -2920,6 +3595,13 @@ function renderModelDiagnostics(snapshot) {
   const clvEdge = marketClv.avg_true_clv ?? marketClv.avg_edge_pick;
   const calibrationTest = winModel.calibration_test ?? {};
   const brierDecomp = calibrationTest.brier_decomposition ?? {};
+  const driftMonitor = winModel.drift_monitor ?? {};
+  const pregameSummary = winModel.pregame_context_summary ?? {};
+  const blendSummary = winModel.market_blend_summary ?? {};
+
+  const driftStatusRaw = String(driftMonitor.status ?? "").replaceAll("_", " ").trim();
+  const driftStatus = driftStatusRaw ? driftStatusRaw.toUpperCase() : "-";
+  const pregameReadiness = pregameSummary.readiness_pct;
 
   const summaryCards = [
     {
@@ -2929,6 +3611,26 @@ function renderModelDiagnostics(snapshot) {
     {
       label: "Win Model CV Acc",
       value: cvMetrics.accuracy !== undefined ? formatPercent(cvMetrics.accuracy, 1) : "-",
+    },
+    {
+      label: "Drift Risk",
+      value: driftStatus,
+    },
+    {
+      label: "Overfit Index",
+      value: driftMonitor.overfit_index !== null && driftMonitor.overfit_index !== undefined
+        ? formatPercent(driftMonitor.overfit_index, 1)
+        : "-",
+    },
+    {
+      label: "Pregame Ready",
+      value: pregameReadiness !== null && pregameReadiness !== undefined ? `${formatNumber(pregameReadiness, 1)}%` : "-",
+    },
+    {
+      label: "Avg Market Weight",
+      value: blendSummary.avg_market_weight !== null && blendSummary.avg_market_weight !== undefined
+        ? formatPercent(blendSummary.avg_market_weight, 1)
+        : "-",
     },
     {
       label: "Market Rows (30d)",
@@ -3081,6 +3783,21 @@ function renderModelDiagnostics(snapshot) {
         title: "Calibration Sample",
         value: sampleSize === null || sampleSize === undefined ? "-" : String(sampleSize),
         sub: `Backtest bins used: ${safeText(String(binsUsed || 0))} | Base rate ${baseRate === null || baseRate === undefined ? "-" : formatPercent(baseRate, 1)}`,
+      },
+      {
+        title: "Drift Monitor",
+        value: driftStatus,
+        sub: `Overfit ${driftMonitor.overfit_index !== null && driftMonitor.overfit_index !== undefined ? formatPercent(driftMonitor.overfit_index, 1) : "-"} | CV std ${driftMonitor.cv_accuracy_std !== null && driftMonitor.cv_accuracy_std !== undefined ? formatPercent(driftMonitor.cv_accuracy_std, 1) : "-"}`,
+      },
+      {
+        title: "Pregame Gating",
+        value: pregameReadiness !== null && pregameReadiness !== undefined ? `${formatNumber(pregameReadiness, 1)}%` : "-",
+        sub: `Low-readiness games today: ${safeText(String(pregameSummary.low_readiness_games ?? 0))}`,
+      },
+      {
+        title: "Market Blend Avg",
+        value: blendSummary.avg_market_weight !== null && blendSummary.avg_market_weight !== undefined ? formatPercent(blendSummary.avg_market_weight, 1) : "-",
+        sub: `Games with market lines: ${safeText(String(blendSummary.games_with_market ?? 0))}`,
       },
     ];
 
@@ -3401,6 +4118,10 @@ rrgShowTrails?.addEventListener("change", () => {
 
 rrgExportPngBtn?.addEventListener("click", () => {
   exportRrgAsPng();
+});
+
+rrgMomentumExportPngBtn?.addEventListener("click", () => {
+  exportRrgMomentumSheetAsPng();
 });
 
 advancedExportPngBtn?.addEventListener("click", () => {

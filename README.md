@@ -4,11 +4,11 @@ API-first MLB analytics dashboard built with FastAPI.
 
 It provides:
 - Real-time standings and game status updates
-- Team ranking scores (Mscore, Power, D+, Joe v2)
+- Team ranking scores (Mscore, Power, D+, Joe v3)
 - Daily matchup win probabilities with context adjustments
 - Value/upset lens with optional market odds blend
 - Model diagnostics, calibration, and archive tracking
-- RRG momentum visualization and PNG exports
+- RRG momentum visualization, momentum leader boards, and PNG exports
 
 ## What The App Does
 
@@ -18,7 +18,7 @@ It provides:
   - `Mscore`: multi-bucket team strength blend
   - `Power`: context-adjusted score built on top of Mscore
   - `D+`: defense/pitching-weighted alternative score
-  - `Joe`: xwOBAcon + xFIP based score (v2 with shrinkage + uncertainty)
+  - `Joe`: xwOBAcon + inverse xFIP + clutch execution score (v3 with shrinkage + uncertainty)
   - `Power-D+`: context gap signal
 
 ### 2) Prediction Lens (Daily Matchups)
@@ -42,6 +42,8 @@ It provides:
 ### 5) RRG and Historical Views
 - Relative Rotation Graph (RRG) across multiple score metrics
 - Team selection, trails, viewport controls, export PNG
+- **RS-Momentum Leaders panel**: top 5 improving + top 5 regressing for Power, D+, and Joe
+- **Export Sheet PNG**: printable momentum sheet with all three leaderboards and quick score explanations
 - Snapshot archive backfill endpoint for historical RRG depth
 
 ## Data Sources
@@ -129,6 +131,11 @@ $env:MSCORE_ODDS_API_KEY = "<your_odds_api_key>"
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8787
 ```
 
+Or create a project `.env` file (auto-loaded at startup):
+```dotenv
+MSCORE_ODDS_API_KEY=<your_odds_api_key>
+```
+
 ## Score Cheat Sheet
 
 - `Mscore`
@@ -137,11 +144,13 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8787
   - Mscore with context/risk/form/talent overlays and confidence weighting
 - `D+`
   - Defense/pitching-emphasized score with stronger run-prevention weighting
-- `Joe (v2)`
-  - xwOBAcon + inverse xFIP composite with:
-    - data-driven internal weighting
-    - sample-size shrinkage toward neutral baseline
-    - confidence and uncertainty bands
+- `Joe (v3)`
+  - Fixed 45/40/15 composite:
+    - 45% xwOBAcon quality
+    - 40% inverse xFIP quality
+    - 15% clutch execution (leverage + clutch index)
+  - sample-size shrinkage toward neutral baseline
+  - confidence and uncertainty bands
 
 ## Generated Local Artifacts
 

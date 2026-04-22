@@ -74,6 +74,24 @@ ELO_BASE = 1500.0
 ELO_K = 20.0
 ELO_HOME_FIELD_ADV = 35.0
 
+
+def _read_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+HOME_PRIOR_NEUTRALIZE_STRENGTH = max(0.0, min(1.0, _read_env_float("MSCORE_HOME_PRIOR_NEUTRALIZE_STRENGTH", 0.35)))
+DEFAULT_HOME_BASE_RATE = 0.5318
+MARKET_FETCH_SCHEMA_VERSION = "v3"
+MARKET_BLEND_MIN_WEIGHT = 0.16
+MARKET_BLEND_MAX_WEIGHT = 0.56
+PREGAME_CONTEXT_MIN_MULTIPLIER = 0.55
+
 MODEL_CACHE_LOCK = threading.Lock()
 MODEL_CACHE: dict[Any, dict[str, Any]] = {}
 PREDICTION_CACHE: dict[str, Any] = {}
@@ -239,6 +257,25 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
 def _logit(p: np.ndarray) -> np.ndarray:
     clipped = np.clip(p, 1e-6, 1 - 1e-6)
     return np.log(clipped / (1.0 - clipped))
+
+
+def _neutralize_home_prior(
+    home_prob: float,
+    *,
+    home_base_rate: float,
+    strength: float = HOME_PRIOR_NEUTRALIZE_STRENGTH,
+) -> tuple[float, float]:
+    p = _clamp_prob(home_prob)
+    s = max(0.0, min(1.0, float(strength)))
+    if s <= 0:
+        return p, 0.0
+
+    base = _clamp_prob(max(0.5, min(0.65, float(home_base_rate))))
+    shift = float(_logit(np.asarray([base], dtype=float))[0]) * s
+    adjusted_logit = float(_logit(np.asarray([p], dtype=float))[0]) - shift
+    neutralized = float(_sigmoid(np.asarray([adjusted_logit], dtype=float))[0])
+    neutralized = _clamp_prob(neutralized)
+    return neutralized, float(neutralized - p)
 
 
 def _smoothed_rate(num: float, den: float, prior_mean: float = 0.5, prior_weight: float = 6.0) -> float:
@@ -585,6 +622,55 @@ def _fetch_advanced_team_lookup(season: int) -> dict[str, dict[str, float]]:
             continue
 
         ops = _to_float(stats.get("mlb::season::hitting::ops"), 0.720)
+        games_played = _to_float(stats.get("mlb::season::hitting::gamesPlayed"), 0.0)
+        leverage_conf = _clip((games_played / 95.0) if games_played > 0 else 0.25, 0.25, 1.0)
+
+        hitting_ops_risp = _to_float(stats.get("mlb::situational::hitting::risp::ops"), ops)
+        hitting_ops_risp2 = _to_float(stats.get("mlb::situational::hitting::risp2::ops"), hitting_ops_risp)
+        hitting_ops_late_close = _to_float(stats.get("mlb::situational::hitting::lc::ops"), ops)
+
+        pitching_ops_allowed = _to_float(stats.get("mlb::season::pitching::ops"), 0.720)
+        pitching_ops_risp_allowed = _to_float(stats.get("mlb::situational::pitching::risp::ops"), pitching_ops_allowed)
+        pitching_ops_risp2_allowed = _to_float(stats.get("mlb::situational::pitching::risp2::ops"), pitching_ops_risp_allowed)
+        pitching_ops_late_close_allowed = _to_float(stats.get("mlb::situational::pitching::lc::ops"), pitching_ops_allowed)
+
+        hitting_ops_risp = _clip(hitting_ops_risp, 0.450, 1.220)
+        hitting_ops_risp2 = _clip(hitting_ops_risp2, 0.420, 1.240)
+        hitting_ops_late_close = _clip(hitting_ops_late_close, 0.420, 1.220)
+        pitching_ops_allowed = _clip(pitching_ops_allowed, 0.450, 1.120)
+        pitching_ops_risp_allowed = _clip(pitching_ops_risp_allowed, 0.420, 1.240)
+        pitching_ops_risp2_allowed = _clip(pitching_ops_risp2_allowed, 0.420, 1.260)
+        pitching_ops_late_close_allowed = _clip(pitching_ops_late_close_allowed, 0.420, 1.240)
+
+        leverage_offense_raw = _clip(
+            0.50 * ((hitting_ops_late_close - 0.450) / 0.650)
+            + 0.30 * ((hitting_ops_risp2 - 0.450) / 0.650)
+            + 0.20 * ((hitting_ops_risp - 0.450) / 0.650),
+            0.0,
+            1.0,
+        )
+        leverage_pitching_raw = _clip(
+            0.50 * ((1.100 - pitching_ops_late_close_allowed) / 0.650)
+            + 0.30 * ((1.100 - pitching_ops_risp2_allowed) / 0.650)
+            + 0.20 * ((1.100 - pitching_ops_risp_allowed) / 0.650),
+            0.0,
+            1.0,
+        )
+        leverage_offense_quality = _clip(leverage_conf * leverage_offense_raw + (1.0 - leverage_conf) * 0.5, 0.0, 1.0)
+        leverage_pitching_quality = _clip(leverage_conf * leverage_pitching_raw + (1.0 - leverage_conf) * 0.5, 0.0, 1.0)
+        leverage_net_quality = _clip(0.52 * leverage_offense_quality + 0.48 * leverage_pitching_quality, 0.0, 1.0)
+
+        clutch_off_delta = _clip(
+            leverage_conf * (0.55 * (hitting_ops_late_close - ops) + 0.45 * (hitting_ops_risp2 - ops)),
+            -0.250,
+            0.250,
+        )
+        clutch_pitch_delta = _clip(
+            leverage_conf * (pitching_ops_allowed - (0.55 * pitching_ops_late_close_allowed + 0.45 * pitching_ops_risp2_allowed)),
+            -0.250,
+            0.250,
+        )
+        clutch_index = _clip(0.5 + (0.55 * clutch_off_delta + 0.45 * clutch_pitch_delta) / 0.30, 0.0, 1.0)
 
         k_pct = _ratio_or_none(
             _first_metric_value(
@@ -676,20 +762,22 @@ def _fetch_advanced_team_lookup(season: int) -> dict[str, dict[str, float]]:
         hr9_quality = _clip((1.55 - hr9) / 0.90, 0.0, 1.0)
 
         offense_expected_quality = _clip(
-            0.56 * xwobacon_quality
-            + 0.16 * hard_hit_pct
-            + 0.12 * line_drive_pct
+            0.50 * xwobacon_quality
+            + 0.14 * hard_hit_pct
+            + 0.10 * line_drive_pct
             + 0.08 * bb_pct
-            + 0.08 * (1.0 - k_pct),
+            + 0.08 * (1.0 - k_pct)
+            + 0.10 * leverage_offense_quality,
             0.0,
             1.0,
         )
 
         pitching_expected_quality = _clip(
-            0.52 * xfip_quality
-            + 0.20 * kbb_quality
-            + 0.14 * hr9_quality
-            + 0.14 * whiff_pct,
+            0.47 * xfip_quality
+            + 0.18 * kbb_quality
+            + 0.13 * hr9_quality
+            + 0.12 * whiff_pct
+            + 0.10 * leverage_pitching_quality,
             0.0,
             1.0,
         )
@@ -699,6 +787,17 @@ def _fetch_advanced_team_lookup(season: int) -> dict[str, dict[str, float]]:
             "xfip_proxy": xfip_proxy,
             "offense_expected_quality": offense_expected_quality,
             "pitching_expected_quality": pitching_expected_quality,
+            "hitting_ops_risp": hitting_ops_risp,
+            "hitting_ops_risp2": hitting_ops_risp2,
+            "hitting_ops_late_close": hitting_ops_late_close,
+            "pitching_ops_allowed": pitching_ops_allowed,
+            "pitching_ops_risp_allowed": pitching_ops_risp_allowed,
+            "pitching_ops_risp2_allowed": pitching_ops_risp2_allowed,
+            "pitching_ops_late_close_allowed": pitching_ops_late_close_allowed,
+            "leverage_offense_quality": leverage_offense_quality,
+            "leverage_pitching_quality": leverage_pitching_quality,
+            "leverage_net_quality": leverage_net_quality,
+            "clutch_index": clutch_index,
         }
 
     if rows:
@@ -1306,6 +1405,230 @@ def _estimate_prediction_uncertainty(
     }
 
 
+def _scale_adjustment_fields(parts: dict[str, Any], multiplier: float, keys: tuple[str, ...]) -> dict[str, Any]:
+    out = dict(parts or {})
+    m = float(np.clip(float(multiplier), PREGAME_CONTEXT_MIN_MULTIPLIER, 1.0))
+
+    for key in keys:
+        value = out.get(key)
+        if isinstance(value, (int, float, np.floating)):
+            out[key] = round(float(value) * m, 4)
+
+    return out
+
+
+def _pregame_context_gates(
+    lineup_context: dict[str, Any],
+    home_pitcher: dict[str, Any],
+    away_pitcher: dict[str, Any],
+) -> dict[str, Any]:
+    home_lineup_count = _to_int(lineup_context.get("home_batting_order_count"), 0)
+    away_lineup_count = _to_int(lineup_context.get("away_batting_order_count"), 0)
+    home_lineup_confirmed = bool(lineup_context.get("home_confirmed"))
+    away_lineup_confirmed = bool(lineup_context.get("away_confirmed"))
+
+    home_lineup_score = 1.0 if home_lineup_confirmed else max(0.0, min(0.9, home_lineup_count / 9.0))
+    away_lineup_score = 1.0 if away_lineup_confirmed else max(0.0, min(0.9, away_lineup_count / 9.0))
+    lineup_readiness = max(0.0, min(1.0, 0.5 * (home_lineup_score + away_lineup_score)))
+
+    home_starter_known = bool(home_pitcher and home_pitcher.get("id"))
+    away_starter_known = bool(away_pitcher and away_pitcher.get("id"))
+    home_rel = max(0.0, min(1.0, _to_float((home_pitcher or {}).get("reliability"), 0.0)))
+    away_rel = max(0.0, min(1.0, _to_float((away_pitcher or {}).get("reliability"), 0.0)))
+
+    home_starter_score = (0.25 + (0.75 * home_rel)) if home_starter_known else 0.2
+    away_starter_score = (0.25 + (0.75 * away_rel)) if away_starter_known else 0.2
+    starter_readiness = max(0.0, min(1.0, 0.5 * (home_starter_score + away_starter_score)))
+
+    overall_readiness = max(0.0, min(1.0, (0.58 * starter_readiness) + (0.42 * lineup_readiness)))
+
+    lineup_multiplier = float(np.clip(0.45 + (0.55 * lineup_readiness), PREGAME_CONTEXT_MIN_MULTIPLIER, 1.0))
+    starter_multiplier = float(np.clip(0.5 + (0.5 * starter_readiness), PREGAME_CONTEXT_MIN_MULTIPLIER, 1.0))
+    split_multiplier = float(np.clip(0.55 + (0.45 * min(lineup_readiness, starter_readiness)), PREGAME_CONTEXT_MIN_MULTIPLIER, 1.0))
+    overall_multiplier = float(np.clip(0.5 + (0.5 * overall_readiness), PREGAME_CONTEXT_MIN_MULTIPLIER, 1.0))
+
+    return {
+        "overall_multiplier": overall_multiplier,
+        "lineup_multiplier": lineup_multiplier,
+        "starter_multiplier": starter_multiplier,
+        "split_multiplier": split_multiplier,
+        "home_lineup_ready": bool(home_lineup_confirmed or home_lineup_count >= 7),
+        "away_lineup_ready": bool(away_lineup_confirmed or away_lineup_count >= 7),
+        "home_starter_ready": bool(home_starter_known),
+        "away_starter_ready": bool(away_starter_known),
+        "lineup_readiness": round(float(lineup_readiness), 4),
+        "starter_readiness": round(float(starter_readiness), 4),
+        "overall_readiness": round(float(overall_readiness), 4),
+    }
+
+
+def _compute_market_blend_weight(
+    *,
+    pre_market_home_prob: float,
+    market_home_prob: float | None,
+    market_book_count: int,
+    market_last_update: str | None,
+    reference_date: dt.date,
+    pre_market_uncertainty_level: str,
+) -> tuple[float, dict[str, Any]]:
+    if market_home_prob is None:
+        return 0.0, {
+            "policy": "dynamic_v1",
+            "reason": "market_missing",
+            "base": 0.0,
+            "book_factor": 0.0,
+            "freshness_factor": 0.0,
+            "uncertainty_bonus": 0.0,
+            "disagreement_bonus": 0.0,
+            "line_age_hours": None,
+        }
+
+    confidence = abs(float(pre_market_home_prob) - 0.5)
+    disagreement = abs(float(pre_market_home_prob) - float(market_home_prob))
+
+    if confidence < 0.04:
+        base = 0.34
+    elif confidence < 0.08:
+        base = 0.29
+    else:
+        base = 0.24
+
+    uncertainty_bonus = 0.0
+    if str(pre_market_uncertainty_level).lower() == "high":
+        uncertainty_bonus = 0.08
+    elif str(pre_market_uncertainty_level).lower() == "medium":
+        uncertainty_bonus = 0.04
+
+    disagreement_bonus = min(0.08, disagreement * 0.5)
+
+    books = max(0, int(market_book_count))
+    book_factor = float(np.clip(0.6 + (min(books, 14) / 20.0), 0.6, 1.25))
+
+    age_hours = None
+    freshness_factor = 0.9
+    last_update_dt = _parse_iso_utc_timestamp(market_last_update)
+    if last_update_dt is not None:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        age_hours = max(0.0, (now_utc - last_update_dt).total_seconds() / 3600.0)
+        if age_hours <= 2.0:
+            freshness_factor = 1.0
+        elif age_hours <= 6.0:
+            freshness_factor = 0.94
+        elif age_hours <= 12.0:
+            freshness_factor = 0.85
+        else:
+            freshness_factor = 0.74
+    else:
+        ref_cutoff = dt.datetime.combine(reference_date, dt.time(hour=8, tzinfo=dt.timezone.utc))
+        if dt.datetime.now(dt.timezone.utc) - ref_cutoff > dt.timedelta(hours=18):
+            freshness_factor = 0.8
+
+    weight_raw = (base + uncertainty_bonus + disagreement_bonus) * book_factor * freshness_factor
+    min_weight = MARKET_BLEND_MIN_WEIGHT if books >= 3 else max(0.10, MARKET_BLEND_MIN_WEIGHT - 0.04)
+    market_weight = float(np.clip(weight_raw, min_weight, MARKET_BLEND_MAX_WEIGHT))
+
+    reason = "balanced"
+    if uncertainty_bonus >= 0.08:
+        reason = "high_uncertainty"
+    elif disagreement_bonus >= 0.05:
+        reason = "strong_disagreement"
+    elif books < 3:
+        reason = "thin_market"
+    elif freshness_factor < 0.82:
+        reason = "stale_market"
+
+    return market_weight, {
+        "policy": "dynamic_v1",
+        "reason": reason,
+        "base": round(float(base), 4),
+        "book_factor": round(float(book_factor), 4),
+        "freshness_factor": round(float(freshness_factor), 4),
+        "uncertainty_bonus": round(float(uncertainty_bonus), 4),
+        "disagreement_bonus": round(float(disagreement_bonus), 4),
+        "line_age_hours": round(float(age_hours), 2) if age_hours is not None else None,
+    }
+
+
+def _build_drift_monitor(
+    train_metrics: dict[str, Any],
+    validation_metrics: dict[str, Any],
+    test_metrics: dict[str, Any],
+    rolling_cv: dict[str, Any],
+) -> dict[str, Any]:
+    def _metric(metrics: dict[str, Any], key: str) -> float | None:
+        value = _to_float(metrics.get(key), float("nan"))
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return float(value)
+
+    train_acc = _metric(train_metrics, "accuracy")
+    val_acc = _metric(validation_metrics, "accuracy")
+    test_acc = _metric(test_metrics, "accuracy")
+    train_log_loss = _metric(train_metrics, "log_loss")
+    val_log_loss = _metric(validation_metrics, "log_loss")
+    test_log_loss = _metric(test_metrics, "log_loss")
+
+    folds = list((rolling_cv or {}).get("folds") or [])
+    fold_acc = [
+        _to_float(row.get("accuracy"), float("nan"))
+        for row in folds
+        if not math.isnan(_to_float(row.get("accuracy"), float("nan")))
+    ]
+    fold_log = [
+        _to_float(row.get("log_loss"), float("nan"))
+        for row in folds
+        if not math.isnan(_to_float(row.get("log_loss"), float("nan")))
+    ]
+
+    cv_mean = (rolling_cv or {}).get("mean") or {}
+    cv_acc = _metric(cv_mean, "accuracy")
+    cv_log_loss = _metric(cv_mean, "log_loss")
+
+    acc_gap_train_test = (train_acc - test_acc) if train_acc is not None and test_acc is not None else None
+    acc_gap_val_test = (val_acc - test_acc) if val_acc is not None and test_acc is not None else None
+    log_gap_train_test = (test_log_loss - train_log_loss) if train_log_loss is not None and test_log_loss is not None else None
+    log_gap_val_test = (test_log_loss - val_log_loss) if val_log_loss is not None and test_log_loss is not None else None
+    cv_gap_log_loss = (test_log_loss - cv_log_loss) if cv_log_loss is not None and test_log_loss is not None else None
+
+    overfit_index = 0.0
+    if log_gap_train_test is not None and log_gap_train_test > 0:
+        overfit_index += min(0.45, log_gap_train_test / 0.12)
+    if log_gap_val_test is not None and log_gap_val_test > 0:
+        overfit_index += min(0.35, log_gap_val_test / 0.08)
+    if acc_gap_train_test is not None and acc_gap_train_test > 0:
+        overfit_index += min(0.20, acc_gap_train_test / 0.12)
+
+    if len(fold_acc) >= 2:
+        overfit_index += min(0.15, float(np.std(fold_acc, ddof=0)) / 0.05)
+
+    overfit_index = float(np.clip(overfit_index, 0.0, 1.0))
+
+    status = "stable"
+    recommendation = "Generalization looks stable."
+    if overfit_index >= 0.68:
+        status = "high_risk"
+        recommendation = "High drift risk: increase regularization and reduce feature/adjustment sensitivity."
+    elif overfit_index >= 0.4:
+        status = "watch"
+        recommendation = "Monitor drift: keep retraining cadence and avoid adding high-variance features."
+
+    return {
+        "status": status,
+        "overfit_index": round(float(overfit_index), 4),
+        "recommendation": recommendation,
+        "acc_gap_train_test": round(float(acc_gap_train_test), 4) if acc_gap_train_test is not None else None,
+        "acc_gap_val_test": round(float(acc_gap_val_test), 4) if acc_gap_val_test is not None else None,
+        "log_loss_gap_train_test": round(float(log_gap_train_test), 4) if log_gap_train_test is not None else None,
+        "log_loss_gap_val_test": round(float(log_gap_val_test), 4) if log_gap_val_test is not None else None,
+        "cv_gap_log_loss": round(float(cv_gap_log_loss), 4) if cv_gap_log_loss is not None else None,
+        "cv_accuracy_std": round(float(np.std(fold_acc, ddof=0)), 4) if len(fold_acc) >= 2 else None,
+        "cv_log_loss_std": round(float(np.std(fold_log, ddof=0)), 4) if len(fold_log) >= 2 else None,
+        "cv_fold_count": len(folds),
+        "cv_mean_accuracy": round(float(cv_acc), 4) if cv_acc is not None else None,
+        "cv_mean_log_loss": round(float(cv_log_loss), 4) if cv_log_loss is not None else None,
+    }
+
+
 def _optimize_blend_weight(model_probs: np.ndarray, elo_probs: np.ndarray, y_true: np.ndarray) -> float:
     best_weight = 0.75
     best_loss = float("inf")
@@ -1424,6 +1747,7 @@ def _train_tree_bundle(
     X_val: np.ndarray,
     y_val: np.ndarray,
     elo_val: np.ndarray,
+    compute_importance: bool = True,
 ) -> dict[str, Any]:
     tree_model = HistGradientBoostingClassifier(
         loss="log_loss",
@@ -1450,17 +1774,20 @@ def _train_tree_bundle(
     sample_size = min(len(X_val), 420)
     sample_x = X_val[:sample_size]
     sample_y = y_val[:sample_size]
-    try:
-        perm = permutation_importance(
-            tree_model,
-            sample_x,
-            sample_y,
-            n_repeats=3,
-            random_state=42,
-            scoring="neg_log_loss",
-        )
-        importance_raw = [float(max(0.0, v)) for v in perm.importances_mean.tolist()]
-    except Exception:
+    if compute_importance and sample_size >= 60:
+        try:
+            perm = permutation_importance(
+                tree_model,
+                sample_x,
+                sample_y,
+                n_repeats=3,
+                random_state=42,
+                scoring="neg_log_loss",
+            )
+            importance_raw = [float(max(0.0, v)) for v in perm.importances_mean.tolist()]
+        except Exception:
+            importance_raw = [0.0] * X_train.shape[1]
+    else:
         importance_raw = [0.0] * X_train.shape[1]
 
     bundle = {
@@ -1632,6 +1959,64 @@ def _rolling_cv_summary(X: np.ndarray, y: np.ndarray, elo_probs: np.ndarray) -> 
         "accuracy": round(float(np.mean([f["accuracy"] for f in folds])), 4),
         "log_loss": round(float(np.mean([f["log_loss"] for f in folds])), 4),
         "brier_score": round(float(np.mean([f["brier_score"] for f in folds])), 4),
+        "accuracy_std": round(float(np.std([f["accuracy"] for f in folds], ddof=0)), 4),
+        "log_loss_std": round(float(np.std([f["log_loss"] for f in folds], ddof=0)), 4),
+    }
+    return {"folds": folds, "mean": mean_metrics}
+
+
+def _rolling_cv_summary_tree(X: np.ndarray, y: np.ndarray, elo_probs: np.ndarray) -> dict[str, Any]:
+    n_samples = len(X)
+    if n_samples < 500:
+        return {"folds": [], "mean": {}}
+
+    folds: list[dict[str, Any]] = []
+    min_train = max(240, int(n_samples * 0.45))
+    horizon = max(75, int((n_samples - min_train) / 5))
+
+    for fold_idx in range(1, 6):
+        train_end = min_train + (fold_idx - 1) * horizon
+        test_start = train_end
+        test_end = min(n_samples, test_start + horizon)
+
+        if test_end - test_start < 45 or train_end < 220:
+            continue
+
+        X_fold = X[:train_end]
+        y_fold = y[:train_end]
+        elo_fold = elo_probs[:train_end]
+
+        val_size = max(45, int(len(X_fold) * 0.2))
+        fit_end = len(X_fold) - val_size
+        if fit_end < 160:
+            continue
+
+        bundle = _train_tree_bundle(
+            X_train=X_fold[:fit_end],
+            y_train=y_fold[:fit_end],
+            elo_train=elo_fold[:fit_end],
+            X_val=X_fold[fit_end:],
+            y_val=y_fold[fit_end:],
+            elo_val=elo_fold[fit_end:],
+            compute_importance=False,
+        )
+
+        test_probs = _predict_with_tree_bundle(bundle, X[test_start:test_end], elo_probs[test_start:test_end])
+        fold_metrics = _metrics(y[test_start:test_end], test_probs)
+        fold_metrics["fold"] = fold_idx
+        fold_metrics["train_games"] = int(train_end)
+        fold_metrics["test_games"] = int(test_end - test_start)
+        folds.append(fold_metrics)
+
+    if not folds:
+        return {"folds": [], "mean": {}}
+
+    mean_metrics = {
+        "accuracy": round(float(np.mean([f["accuracy"] for f in folds])), 4),
+        "log_loss": round(float(np.mean([f["log_loss"] for f in folds])), 4),
+        "brier_score": round(float(np.mean([f["brier_score"] for f in folds])), 4),
+        "accuracy_std": round(float(np.std([f["accuracy"] for f in folds], ddof=0)), 4),
+        "log_loss_std": round(float(np.std([f["log_loss"] for f in folds], ddof=0)), 4),
     }
     return {"folds": folds, "mean": mean_metrics}
 
@@ -1927,6 +2312,7 @@ def _build_report_from_split(
     calibration_test = _build_calibration_diagnostics(y_test, test_probs)
 
     rolling_cv = _rolling_cv_summary(X, y, elo_probs)
+    drift_monitor = _build_drift_monitor(train_metrics, val_metrics, test_metrics, rolling_cv)
     feature_importance = _feature_importance_summary(bundle, feature_names=feature_names)
     ablation = _feature_ablation_summary(
         bundle=bundle,
@@ -1962,6 +2348,7 @@ def _build_report_from_split(
             "feature_importance": feature_importance,
             "ablation": ablation,
             "calibration_test": calibration_test,
+            "drift_monitor": drift_monitor,
         },
         "metrics": {
             "train": train_metrics,
@@ -1970,6 +2357,7 @@ def _build_report_from_split(
             "full": full_metrics,
             "rolling_cv": rolling_cv,
             "calibration_test": calibration_test,
+            "drift_monitor": drift_monitor,
         },
         "feature_importance": feature_importance,
         "ablation": ablation,
@@ -2140,6 +2528,8 @@ def _run_backtest_for_season_v4(
         test_metrics = _metrics(y_test, test_probs)
         full_metrics = _metrics(y, full_probs)
         calibration_test = _build_calibration_diagnostics(y_test, test_probs)
+        rolling_cv = _rolling_cv_summary_tree(X, y, elo_probs)
+        drift_monitor = _build_drift_monitor(train_metrics, val_metrics, test_metrics, rolling_cv)
 
         feature_names = _feature_names_for_variant("v4")
         feature_importance = _feature_importance_tree_summary(bundle, feature_names=feature_names)
@@ -2186,14 +2576,16 @@ def _run_backtest_for_season_v4(
                 "feature_importance": feature_importance,
                 "ablation": ablation,
                 "calibration_test": calibration_test,
+                "drift_monitor": drift_monitor,
             },
             "metrics": {
                 "train": train_metrics,
                 "validation": val_metrics,
                 "test": test_metrics,
                 "full": full_metrics,
-                "rolling_cv": {"folds": [], "mean": {}},
+                "rolling_cv": rolling_cv,
                 "calibration_test": calibration_test,
+                "drift_monitor": drift_monitor,
             },
             "feature_importance": feature_importance,
             "ablation": ablation,
@@ -2678,6 +3070,8 @@ def _advanced_team_quality_adjustment(
             "advanced_pitching_edge": 0.0,
             "advanced_xwobacon_edge": 0.0,
             "advanced_xfip_edge": 0.0,
+            "advanced_leverage_edge": 0.0,
+            "advanced_clutch_edge": 0.0,
             "home_xwobacon_proxy": round(float(home.get("xwobacon_proxy")), 4) if home else None,
             "away_xwobacon_proxy": round(float(away.get("xwobacon_proxy")), 4) if away else None,
             "home_xfip_proxy": round(float(home.get("xfip_proxy")), 3) if home else None,
@@ -2686,14 +3080,20 @@ def _advanced_team_quality_adjustment(
             "away_expected_offense_quality": round(float(away.get("offense_expected_quality") * 100.0), 1) if away else None,
             "home_expected_pitching_quality": round(float(home.get("pitching_expected_quality") * 100.0), 1) if home else None,
             "away_expected_pitching_quality": round(float(away.get("pitching_expected_quality") * 100.0), 1) if away else None,
+            "home_leverage_net_quality": round(float(home.get("leverage_net_quality") * 100.0), 1) if home else None,
+            "away_leverage_net_quality": round(float(away.get("leverage_net_quality") * 100.0), 1) if away else None,
+            "home_clutch_index": round(float(home.get("clutch_index") * 100.0), 1) if home else None,
+            "away_clutch_index": round(float(away.get("clutch_index") * 100.0), 1) if away else None,
         }
 
     offense_edge = (float(home["offense_expected_quality"]) - float(away["offense_expected_quality"])) * 0.06
     pitching_edge = (float(home["pitching_expected_quality"]) - float(away["pitching_expected_quality"])) * 0.07
     xwobacon_edge = (float(home["xwobacon_proxy"]) - float(away["xwobacon_proxy"])) * 0.10
     xfip_edge = (float(away["xfip_proxy"]) - float(home["xfip_proxy"])) * 0.018
+    leverage_edge = (float(home.get("leverage_net_quality", 0.5)) - float(away.get("leverage_net_quality", 0.5))) * 0.03
+    clutch_edge = (float(home.get("clutch_index", 0.5)) - float(away.get("clutch_index", 0.5))) * 0.02
 
-    total = max(-0.045, min(0.045, offense_edge + pitching_edge + xwobacon_edge + xfip_edge))
+    total = max(-0.05, min(0.05, offense_edge + pitching_edge + xwobacon_edge + xfip_edge + leverage_edge + clutch_edge))
 
     return total, {
         "advanced_adjustment": round(total, 4),
@@ -2701,6 +3101,8 @@ def _advanced_team_quality_adjustment(
         "advanced_pitching_edge": round(pitching_edge, 4),
         "advanced_xwobacon_edge": round(xwobacon_edge, 4),
         "advanced_xfip_edge": round(xfip_edge, 4),
+        "advanced_leverage_edge": round(leverage_edge, 4),
+        "advanced_clutch_edge": round(clutch_edge, 4),
         "home_xwobacon_proxy": round(float(home["xwobacon_proxy"]), 4),
         "away_xwobacon_proxy": round(float(away["xwobacon_proxy"]), 4),
         "home_xfip_proxy": round(float(home["xfip_proxy"]), 3),
@@ -2709,6 +3111,10 @@ def _advanced_team_quality_adjustment(
         "away_expected_offense_quality": round(float(away["offense_expected_quality"]) * 100.0, 1),
         "home_expected_pitching_quality": round(float(home["pitching_expected_quality"]) * 100.0, 1),
         "away_expected_pitching_quality": round(float(away["pitching_expected_quality"]) * 100.0, 1),
+        "home_leverage_net_quality": round(float(home.get("leverage_net_quality", 0.5)) * 100.0, 1),
+        "away_leverage_net_quality": round(float(away.get("leverage_net_quality", 0.5)) * 100.0, 1),
+        "home_clutch_index": round(float(home.get("clutch_index", 0.5)) * 100.0, 1),
+        "away_clutch_index": round(float(away.get("clutch_index", 0.5)) * 100.0, 1),
     }
 
 
@@ -2761,18 +3167,24 @@ def _fetch_market_probabilities(reference_date: dt.date, canonical_teams: set[st
 
     normalized_to_canonical = {_normalize_team_name(team): team for team in canonical_teams}
 
+    window_start = dt.datetime.combine(reference_date, dt.time(hour=8, minute=0, tzinfo=dt.timezone.utc))
+    window_end = window_start + dt.timedelta(hours=23, minutes=59, seconds=59)
+
+    def _window_params() -> dict[str, str]:
+        return {
+            "apiKey": api_key,
+            "regions": "us",
+            "markets": "h2h",
+            "oddsFormat": "decimal",
+            "dateFormat": "iso",
+            "commenceTimeFrom": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "commenceTimeTo": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
     try:
         response = requests.get(
             "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds",
-            params={
-                "apiKey": api_key,
-                "regions": "us",
-                "markets": "h2h",
-                "oddsFormat": "decimal",
-                "dateFormat": "iso",
-                "commenceTimeFrom": f"{reference_date.isoformat()}T00:00:00Z",
-                "commenceTimeTo": f"{reference_date.isoformat()}T23:59:59Z",
-            },
+            params=_window_params(),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -2780,16 +3192,57 @@ def _fetch_market_probabilities(reference_date: dt.date, canonical_teams: set[st
     except Exception:
         return {}
 
+    # Fallback: some feed states return sparse/empty rows with strict commence filters.
+    if not isinstance(payload, list) or not payload:
+        try:
+            response = requests.get(
+                "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds",
+                params={
+                    "apiKey": api_key,
+                    "regions": "us",
+                    "markets": "h2h",
+                    "oddsFormat": "decimal",
+                    "dateFormat": "iso",
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return {}
+
     output: dict[tuple[str, str], dict[str, Any]] = {}
 
-    for event in payload:
+    for event in payload if isinstance(payload, list) else []:
+        event_time = _parse_iso_utc_timestamp(event.get("commence_time"))
+        if event_time is not None and (event_time < window_start or event_time > window_end):
+            continue
+
         home_raw = event.get("home_team")
-        away_raw = None
-        teams = event.get("teams") or []
-        for team_name in teams:
-            if team_name != home_raw:
-                away_raw = team_name
-                break
+        away_raw = event.get("away_team")
+
+        if not away_raw:
+            teams = event.get("teams") or []
+            for team_name in teams:
+                if team_name != home_raw:
+                    away_raw = team_name
+                    break
+
+        # Newer odds payloads can omit `teams`; derive away from h2h outcomes.
+        if not away_raw:
+            for book in event.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    if market.get("key") != "h2h":
+                        continue
+                    for outcome in market.get("outcomes", []):
+                        name = outcome.get("name")
+                        if name and name != home_raw:
+                            away_raw = name
+                            break
+                    if away_raw:
+                        break
+                if away_raw:
+                    break
 
         home_name = normalized_to_canonical.get(_normalize_team_name(home_raw))
         away_name = normalized_to_canonical.get(_normalize_team_name(away_raw))
@@ -2809,13 +3262,22 @@ def _fetch_market_probabilities(reference_date: dt.date, canonical_teams: set[st
                 if market.get("key") != "h2h":
                     continue
 
+                market_update = _parse_iso_utc_timestamp(market.get("last_update"))
+                if market_update is not None:
+                    book_updates.append(market_update)
+
                 home_price = None
                 away_price = None
                 for outcome in market.get("outcomes", []):
-                    if outcome.get("name") == home_raw:
-                        home_price = _to_float(outcome.get("price"), 0.0)
-                    elif outcome.get("name") == away_raw:
-                        away_price = _to_float(outcome.get("price"), 0.0)
+                    name = outcome.get("name")
+                    price = _to_float(outcome.get("price"), 0.0)
+
+                    if name == home_raw:
+                        home_price = price
+                    elif name == away_raw:
+                        away_price = price
+                    elif away_raw is None and name and name != home_raw:
+                        away_price = price
 
                 if home_price <= 1.0 or away_price <= 1.0:
                     continue
@@ -2911,7 +3373,9 @@ def get_today_matchup_predictions(
 ) -> dict[str, Any]:
     variant = _resolve_model_variant(model_variant)
     back = max(1, int(seasons_back))
-    cache_key = f"{reference_date.isoformat()}::{current_season}::{backtest_season}::{variant}::{back}"
+    market_key = os.getenv("MSCORE_ODDS_API_KEY", "").strip()
+    market_key_fingerprint = market_key[-6:] if market_key else "none"
+    cache_key = f"{reference_date.isoformat()}::{current_season}::{backtest_season}::{variant}::{back}::{market_key_fingerprint}::{MARKET_FETCH_SCHEMA_VERSION}"
     with MODEL_CACHE_LOCK:
         cached = PREDICTION_CACHE.get(cache_key)
         if cached:
@@ -2925,6 +3389,17 @@ def get_today_matchup_predictions(
     model_block = backtest.get("model", {})
     rolling_mean = backtest.get("metrics", {}).get("rolling_cv", {}).get("mean", {})
     calibration_test = model_block.get("calibration_test") or backtest.get("metrics", {}).get("calibration_test", {})
+    drift_monitor = model_block.get("drift_monitor") or backtest.get("metrics", {}).get("drift_monitor")
+    if not drift_monitor:
+        drift_monitor = _build_drift_monitor(
+            backtest.get("metrics", {}).get("train", {}),
+            backtest.get("metrics", {}).get("validation", {}),
+            backtest.get("metrics", {}).get("test", {}),
+            backtest.get("metrics", {}).get("rolling_cv", {}),
+        )
+    home_base_rate = _to_float(calibration_test.get("base_rate"), DEFAULT_HOME_BASE_RATE)
+    if not 0.45 <= home_base_rate <= 0.65:
+        home_base_rate = DEFAULT_HOME_BASE_RATE
 
     states, team_lookup = _build_states_before_date(reference_date=reference_date, season=current_season)
     team_context = _fetch_team_context_lookup(current_season)
@@ -2936,6 +3411,8 @@ def get_today_matchup_predictions(
 
     daily_games = _fetch_schedule_range(reference_date, reference_date)
     predictions: list[dict[str, Any]] = []
+    pregame_overall_multipliers: list[float] = []
+    market_weights_used: list[float] = []
 
     for game in daily_games:
         home_id = game.get("home_id")
@@ -2963,7 +3440,12 @@ def get_today_matchup_predictions(
 
         model_variant_report = _resolve_model_variant(backtest.get("model_variant", variant))
         model_features = _prepare_features_for_model_variant(features, model_variant=model_variant_report)
-        model_home_prob = _predict_home_prob_from_report(backtest, features=model_features, elo_home_prob=elo_home_prob)
+        model_home_prob_raw = _predict_home_prob_from_report(backtest, features=model_features, elo_home_prob=elo_home_prob)
+        model_home_prob, home_prior_neutralization = _neutralize_home_prior(
+            model_home_prob_raw,
+            home_base_rate=home_base_rate,
+            strength=HOME_PRIOR_NEUTRALIZE_STRENGTH,
+        )
 
         home_pitcher = _fetch_pitcher_profile(game.get("home_probable_pitcher_id"), season=current_season)
         away_pitcher = _fetch_pitcher_profile(game.get("away_probable_pitcher_id"), season=current_season)
@@ -3007,6 +3489,51 @@ def get_today_matchup_predictions(
             away_baseline_ops=away_baseline_ops,
         )
 
+        pregame_gates = _pregame_context_gates(lineup_context=lineup_context, home_pitcher=home_pitcher, away_pitcher=away_pitcher)
+        starter_multiplier = _to_float(pregame_gates.get("starter_multiplier"), 1.0)
+        lineup_multiplier = _to_float(pregame_gates.get("lineup_multiplier"), 1.0)
+        split_multiplier = _to_float(pregame_gates.get("split_multiplier"), 1.0)
+
+        starter_adj *= starter_multiplier
+        split_adj *= split_multiplier
+        lineup_adj *= lineup_multiplier
+        lineup_health_adj *= lineup_multiplier
+
+        starter_parts = _scale_adjustment_fields(
+            starter_parts,
+            starter_multiplier,
+            keys=(
+                "starter_adjustment",
+                "starter_era_edge",
+                "starter_whip_edge",
+                "starter_fip_edge",
+                "starter_kbb_edge",
+                "starter_qs_edge",
+            ),
+        )
+        split_parts = _scale_adjustment_fields(
+            split_parts,
+            split_multiplier,
+            keys=(
+                "split_adjustment",
+                "split_home_away_edge",
+                "split_handedness_edge",
+                "split_last10_edge",
+            ),
+        )
+        lineup_parts = _scale_adjustment_fields(
+            lineup_parts,
+            lineup_multiplier,
+            keys=("lineup_adjustment", "lineup_ops_edge", "lineup_confirmed_edge"),
+        )
+        lineup_health_parts = _scale_adjustment_fields(
+            lineup_health_parts,
+            lineup_multiplier,
+            keys=("lineup_health_adjustment", "lineup_health_edge", "lineup_health_confirmed_edge"),
+        )
+
+        pregame_overall_multipliers.append(_to_float(pregame_gates.get("overall_multiplier"), 1.0))
+
         adjusted_home_prob = _clamp_prob(
             model_home_prob
             + starter_adj
@@ -3026,19 +3553,25 @@ def get_today_matchup_predictions(
         market_first_update = market_entry.get("first_update") if market_entry else None
         market_last_update = market_entry.get("last_update") if market_entry else None
 
-        confidence = abs(adjusted_home_prob - 0.5)
-        market_weight = 0.0
-        if market_home_prob is not None:
-            if confidence < 0.05:
-                market_weight = 0.42
-            elif confidence < 0.1:
-                market_weight = 0.35
-            else:
-                market_weight = 0.28
+        pre_market_uncertainty = _estimate_prediction_uncertainty(
+            home_prob=adjusted_home_prob,
+            calibration_test=calibration_test,
+            market_weight=0.0,
+        )
+
+        market_weight, market_blend = _compute_market_blend_weight(
+            pre_market_home_prob=adjusted_home_prob,
+            market_home_prob=market_home_prob,
+            market_book_count=market_book_count,
+            market_last_update=market_last_update,
+            reference_date=reference_date,
+            pre_market_uncertainty_level=str(pre_market_uncertainty.get("level") or "low"),
+        )
 
         final_home_prob = adjusted_home_prob
         if market_home_prob is not None:
             final_home_prob = _clamp_prob((1.0 - market_weight) * adjusted_home_prob + market_weight * market_home_prob)
+            market_weights_used.append(float(market_weight))
 
         home_win_prob = float(final_home_prob)
         away_win_prob = float(1.0 - home_win_prob)
@@ -3073,6 +3606,10 @@ def get_today_matchup_predictions(
             "favored_win_prob": round(favored_prob, 4),
             "confidence": round(abs(home_win_prob - 0.5) * 2, 4),
             "model_home_win_prob": round(model_home_prob, 4),
+            "model_home_win_prob_raw": round(float(model_home_prob_raw), 4),
+            "home_prior_base_rate": round(float(home_base_rate), 4),
+            "home_prior_neutralize_strength": round(float(HOME_PRIOR_NEUTRALIZE_STRENGTH), 2),
+            "home_prior_neutralization": round(float(home_prior_neutralization), 4),
             "pre_market_home_win_prob": round(float(adjusted_home_prob), 4),
             "elo_home_win_prob": round(float(elo_home_prob), 4),
             "starter_adjustment": round(float(starter_adj), 4),
@@ -3086,6 +3623,14 @@ def get_today_matchup_predictions(
             "advanced_adjustment": round(float(advanced_adj), 4),
             "market_home_win_prob": round(float(market_home_prob), 4) if market_home_prob is not None else None,
             "market_weight": round(float(market_weight), 2),
+            "market_weight_policy": market_blend.get("policy"),
+            "market_weight_reason": market_blend.get("reason"),
+            "market_weight_base": market_blend.get("base"),
+            "market_weight_book_factor": market_blend.get("book_factor"),
+            "market_weight_freshness_factor": market_blend.get("freshness_factor"),
+            "market_weight_uncertainty_bonus": market_blend.get("uncertainty_bonus"),
+            "market_weight_disagreement_bonus": market_blend.get("disagreement_bonus"),
+            "market_last_update_age_hours": market_blend.get("line_age_hours"),
             "market_book_count": int(market_book_count),
             "market_first_update": market_first_update,
             "market_last_update": market_last_update,
@@ -3096,8 +3641,20 @@ def get_today_matchup_predictions(
             "model_vs_market_edge_pick": round(float(edge_fields.get("model_vs_market_edge_pick")), 4) if edge_fields.get("model_vs_market_edge_pick") is not None else None,
             "value_tier": edge_fields.get("value_tier", "none"),
             "market_disagrees_with_model": bool(edge_fields.get("market_disagrees_with_model", False)),
+            "pre_market_uncertainty_level": pre_market_uncertainty.get("level"),
             "uncertainty_level": uncertainty_profile.get("level"),
             "high_uncertainty": bool(uncertainty_profile.get("high_uncertainty")),
+            "pregame_context_multiplier": round(float(pregame_gates.get("overall_multiplier", 1.0)), 4),
+            "pregame_lineup_multiplier": round(float(pregame_gates.get("lineup_multiplier", 1.0)), 4),
+            "pregame_starter_multiplier": round(float(pregame_gates.get("starter_multiplier", 1.0)), 4),
+            "pregame_split_multiplier": round(float(pregame_gates.get("split_multiplier", 1.0)), 4),
+            "pregame_lineup_readiness": pregame_gates.get("lineup_readiness"),
+            "pregame_starter_readiness": pregame_gates.get("starter_readiness"),
+            "pregame_overall_readiness": pregame_gates.get("overall_readiness"),
+            "pregame_home_lineup_ready": bool(pregame_gates.get("home_lineup_ready")),
+            "pregame_away_lineup_ready": bool(pregame_gates.get("away_lineup_ready")),
+            "pregame_home_starter_ready": bool(pregame_gates.get("home_starter_ready")),
+            "pregame_away_starter_ready": bool(pregame_gates.get("away_starter_ready")),
             "home_win_prob_band_low": uncertainty_profile.get("band_low"),
             "home_win_prob_band_high": uncertainty_profile.get("band_high"),
             "home_win_prob_band_half": uncertainty_profile.get("band_half"),
@@ -3148,6 +3705,10 @@ def get_today_matchup_predictions(
     else:
         market_status = "enabled_live"
 
+    pregame_avg_multiplier = float(np.mean(pregame_overall_multipliers)) if pregame_overall_multipliers else None
+    pregame_low_readiness_games = sum(1 for value in pregame_overall_multipliers if value < 0.74)
+    market_avg_weight = float(np.mean(market_weights_used)) if market_weights_used else None
+
     result = {
         "reference_date": reference_date.isoformat(),
         "season": current_season,
@@ -3165,6 +3726,8 @@ def get_today_matchup_predictions(
             "metrics_test": backtest.get("metrics", {}).get("test", {}),
             "rolling_cv_mean": rolling_mean,
             "calibration_test": calibration_test,
+            "home_prior_base_rate": round(float(home_base_rate), 4),
+            "home_prior_neutralize_strength": round(float(HOME_PRIOR_NEUTRALIZE_STRENGTH), 2),
             "uncertainty_policy": {
                 "high_band_threshold": 0.11,
                 "medium_band_threshold": 0.075,
@@ -3173,6 +3736,21 @@ def get_today_matchup_predictions(
             },
             "feature_importance": model_block.get("feature_importance", backtest.get("feature_importance", [])),
             "ablation": model_block.get("ablation", backtest.get("ablation", {})),
+            "drift_monitor": drift_monitor or {},
+            "market_blend_policy": {
+                "policy": "dynamic_v1",
+                "min_weight": MARKET_BLEND_MIN_WEIGHT,
+                "max_weight": MARKET_BLEND_MAX_WEIGHT,
+            },
+            "market_blend_summary": {
+                "avg_market_weight": round(float(market_avg_weight), 4) if market_avg_weight is not None else None,
+                "games_with_market": len(market_weights_used),
+            },
+            "pregame_context_summary": {
+                "avg_multiplier": round(float(pregame_avg_multiplier), 4) if pregame_avg_multiplier is not None else None,
+                "low_readiness_games": int(pregame_low_readiness_games),
+                "readiness_pct": round(float((pregame_avg_multiplier or 0.0) * 100.0), 1) if pregame_avg_multiplier is not None else None,
+            },
             "trained_at": backtest.get("trained_at"),
         },
         "games": predictions,

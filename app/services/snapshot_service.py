@@ -63,6 +63,14 @@ PITCHING_STRIKEOUTS_PER9_ADV_KEY = "mlb::seasonAdvanced::pitching::strikeoutsPer
 PITCHING_BB_PER9_ADV_KEY = "mlb::seasonAdvanced::pitching::baseOnBallsPer9"
 PITCHING_HR_PER9_ADV_KEY = "mlb::seasonAdvanced::pitching::homeRunsPer9"
 PITCHING_FLY_BALL_PCT_ADV_KEY = "mlb::seasonAdvanced::pitching::flyBallPercentage"
+PITCHING_OPS_ALLOWED_KEY = "mlb::season::pitching::ops"
+
+HITTING_OPS_RISP_KEY = "mlb::situational::hitting::risp::ops"
+HITTING_OPS_RISP2_KEY = "mlb::situational::hitting::risp2::ops"
+HITTING_OPS_LATE_CLOSE_KEY = "mlb::situational::hitting::lc::ops"
+PITCHING_OPS_RISP_ALLOWED_KEY = "mlb::situational::pitching::risp::ops"
+PITCHING_OPS_RISP2_ALLOWED_KEY = "mlb::situational::pitching::risp2::ops"
+PITCHING_OPS_LATE_CLOSE_ALLOWED_KEY = "mlb::situational::pitching::lc::ops"
 
 XWOBA_CON_CANDIDATE_KEYS = (
     "mlb::seasonAdvanced::hitting::xwobaCon",
@@ -83,8 +91,10 @@ RANKING_TABLE_DEFINITIONS = [
     {"key": "mscore", "label": "Mscore", "description": "Friend-style blend (improved): Base + Offense + Defense + Context buckets on an absolute sigmoid 0-100 scale (not league min-max)."},
     {"key": "live_power_score", "label": "Power", "description": "Context-adjusted formula: Mscore plus Talent/Form/Risk overlay with elite-team dampening, confidence scaling, capped adjustment range, and a 5% coaching/execution overlay when the signal is meaningful."},
     {"key": "d_plus_score", "label": "D+", "description": "Defense-plus score: near-equal Base/Offense/Defense/Context blend with extra pitching quality/health emphasis."},
-    {"key": "joe_score", "label": "Joe", "description": "Joe Score v2: data-driven xwOBAcon/xFIP blend with sample-size shrinkage and uncertainty control (higher is better)."},
+    {"key": "joe_score", "label": "Joe", "description": "Joe Score v3: fixed 45/40/15 blend (xwOBAcon / xFIP-inverse / clutch execution) with sample-size shrinkage and uncertainty control (higher is better)."},
     {"key": "power_minus_d_plus", "label": "Power-D+", "description": "Power minus D+ score. Positive means context/timing boosts above defense-plus baseline; negative means caution vs D+ baseline."},
+    {"key": "leverage_net_quality", "label": "LevQ", "description": "Combined pressure-situation quality from offense (RISP/late-close) and pitching run prevention in those same spots."},
+    {"key": "clutch_index", "label": "Clutch", "description": "Net clutch execution index versus season baseline using late/close and RISP two-out performance."},
     {"key": "record", "label": "W-L", "description": "Current season wins and losses from MLB standings."},
     {"key": "win_pct", "label": "Win%", "description": "Current winning percentage from MLB standings."},
     {"key": "run_diff", "label": "RD", "description": "Run differential from MLB standings."},
@@ -103,14 +113,27 @@ LIVE_STAT_CATALOG = [
     {"key": "mscore_context_component", "label": "Mscore Context", "description": "Small context bucket (pythag/regression and pitching differential signals).", "group": "Live Model"},
     {"key": "xwobacon_proxy", "label": "xwOBAcon Proxy", "description": "Expected contact quality proxy: uses direct API xwOBAcon when available, otherwise derives from contact run value and batted-ball mix.", "group": "Live Model"},
     {"key": "xfip_proxy", "label": "xFIP Proxy", "description": "Expected run-prevention proxy: uses direct API xFIP when available, otherwise derives from regressed HR/9 with K/9, BB/9, and fly-ball profile. Lower is better.", "group": "Live Model"},
-    {"key": "joe_score", "label": "Joe Score", "description": "Joe Score v2: data-driven xwOBAcon/xFIP blend with sample-size shrinkage toward league baseline.", "group": "Live Model"},
-    {"key": "joe_rank", "label": "Joe Rank", "description": "Rank of Joe Score across all MLB teams (1 = best combined xwOBAcon + xFIP profile).", "group": "Live Model"},
+    {"key": "hitting_ops_risp", "label": "OPS (RISP)", "description": "Team OPS with runners in scoring position (MLB situation split: risp).", "group": "Leverage / Clutch"},
+    {"key": "hitting_ops_risp2", "label": "OPS (RISP, 2 Out)", "description": "Team OPS with runners in scoring position and two outs (split: risp2).", "group": "Leverage / Clutch"},
+    {"key": "hitting_ops_late_close", "label": "OPS (Late/Close)", "description": "Team OPS in late/close situations (split: lc).", "group": "Leverage / Clutch"},
+    {"key": "pitching_ops_risp_allowed", "label": "Opp OPS (RISP)", "description": "Opponent OPS allowed by team pitching with runners in scoring position.", "group": "Leverage / Clutch"},
+    {"key": "pitching_ops_risp2_allowed", "label": "Opp OPS (RISP, 2 Out)", "description": "Opponent OPS allowed by team pitching with RISP and two outs.", "group": "Leverage / Clutch"},
+    {"key": "pitching_ops_late_close_allowed", "label": "Opp OPS (Late/Close)", "description": "Opponent OPS allowed by team pitching in late/close situations.", "group": "Leverage / Clutch"},
+    {"key": "leverage_offense_quality", "label": "Leverage Offense", "description": "0-100 pressure offense quality blend from OPS in RISP/RISP2/Late-Close contexts.", "group": "Leverage / Clutch"},
+    {"key": "leverage_pitching_quality", "label": "Leverage Pitching", "description": "0-100 pressure pitching quality blend from opponent OPS allowed in RISP/RISP2/Late-Close contexts.", "group": "Leverage / Clutch"},
+    {"key": "leverage_net_quality", "label": "Leverage Net", "description": "Combined leverage quality (offense + pitching), higher is better.", "group": "Leverage / Clutch"},
+    {"key": "clutch_index", "label": "Clutch Index", "description": "0-100 clutch execution index versus baseline in pressure situations.", "group": "Leverage / Clutch"},
+    {"key": "clutch_offense_delta_ops", "label": "Clutch Off OPS Delta", "description": "Offense clutch delta: late/close and RISP2 OPS versus season OPS baseline.", "group": "Leverage / Clutch"},
+    {"key": "clutch_pitching_delta_ops", "label": "Clutch Pitch OPS Delta", "description": "Pitching clutch delta: season OPS allowed minus late/close and RISP2 OPS allowed.", "group": "Leverage / Clutch"},
+    {"key": "joe_score", "label": "Joe Score", "description": "Joe Score v3: fixed 45/40/15 blend (xwOBAcon / xFIP-inverse / clutch execution) with sample-size shrinkage toward league baseline.", "group": "Live Model"},
+    {"key": "joe_rank", "label": "Joe Rank", "description": "Rank of Joe Score across all MLB teams (1 = best combined xwOBAcon + xFIP + clutch profile).", "group": "Live Model"},
     {"key": "joe_confidence", "label": "Joe Confidence", "description": "Confidence (0-100) in Joe Score after sample-size and signal-agreement checks.", "group": "Live Model"},
     {"key": "joe_band_low", "label": "Joe Band Low", "description": "Lower uncertainty band for Joe Score.", "group": "Live Model"},
     {"key": "joe_band_high", "label": "Joe Band High", "description": "Upper uncertainty band for Joe Score.", "group": "Live Model"},
     {"key": "joe_uncertainty_level", "label": "Joe Uncertainty", "description": "Qualitative Joe uncertainty bucket: low/medium/high.", "group": "Live Model"},
-    {"key": "joe_weight_xwobacon_pct", "label": "Joe Weight xwOBAcon", "description": "Current Joe model weight (%) assigned to xwOBAcon side.", "group": "Live Model"},
-    {"key": "joe_weight_xfip_pct", "label": "Joe Weight xFIP", "description": "Current Joe model weight (%) assigned to inverse xFIP side.", "group": "Live Model"},
+    {"key": "joe_weight_xwobacon_pct", "label": "Joe Weight xwOBAcon", "description": "Fixed Joe model weight (%) assigned to xwOBAcon side.", "group": "Live Model"},
+    {"key": "joe_weight_xfip_pct", "label": "Joe Weight xFIP", "description": "Fixed Joe model weight (%) assigned to inverse xFIP side.", "group": "Live Model"},
+    {"key": "joe_weight_clutch_pct", "label": "Joe Weight Clutch", "description": "Fixed Joe model weight (%) assigned to clutch execution side (leverage + clutch index).", "group": "Live Model"},
     {"key": "live_power_score", "label": "Live Power Score", "description": "Context-adjusted formula: Mscore plus Talent/Form/Risk overlay with elite-team dampening, confidence scaling, capped adjustment range, and a 5% coaching/execution overlay when the signal is meaningful.", "group": "Live Model"},
     {"key": "d_plus_score", "label": "D+ Score", "description": "Defense-plus score: near-equal Base/Offense/Defense/Context blend with extra pitching quality/health emphasis.", "group": "Live Model"},
     {"key": "power_minus_d_plus", "label": "Power-D+", "description": "Power minus D+ score. Positive means context/timing boosts above defense-plus baseline; negative means caution vs D+ baseline.", "group": "Live Model"},
@@ -373,6 +396,183 @@ def _derive_market_edge_pick(game: dict[str, Any]) -> float | None:
     return float(model_pick_prob - market_pick_prob)
 
 
+def _matchup_id_from_game(game: dict[str, Any]) -> str:
+    home_team = str(game.get("home_team") or "")
+    away_team = str(game.get("away_team") or "")
+    game_pk = game.get("game_pk")
+    if game_pk is not None:
+        return f"pk:{game_pk}"
+    return f"alt:{game.get('official_date') or ''}|{away_team}|{home_team}"
+
+
+def _bet_quality_grade(score: float) -> str:
+    if score >= 75.0:
+        return "A"
+    if score >= 60.0:
+        return "B"
+    if score >= 45.0:
+        return "C"
+    return "Pass"
+
+
+def _compute_bet_quality(
+    *,
+    pre_market_home: float,
+    home_prob: float,
+    market_edge_pick: float | None,
+    market_edge_pick_raw: float | None,
+    confidence: float,
+    uncertainty_level: str,
+    uncertainty_multiplier: float,
+    band_half: float | None,
+    market_available: bool,
+) -> dict[str, Any]:
+    if market_edge_pick_raw is not None:
+        edge_basis = abs(float(market_edge_pick_raw))
+    elif market_edge_pick is not None:
+        edge_basis = abs(float(market_edge_pick))
+    else:
+        edge_basis = abs(float(pre_market_home) - 0.5) * 0.85
+
+    edge_scale = 0.08 if market_available else 0.05
+    edge_strength = max(0.0, min(1.0, edge_basis / edge_scale))
+    confidence_clamped = max(0.0, min(1.0, float(confidence)))
+    confidence_factor = 0.55 + (0.45 * confidence_clamped)
+
+    if band_half is None:
+        band_factor = 0.9
+    else:
+        band_ref = max(0.0, min(0.2, float(band_half)))
+        band_factor = 1.0 - ((band_ref / 0.2) * 0.55)
+    band_factor = max(0.35, min(1.0, band_factor))
+
+    level = str(uncertainty_level or "low").strip().lower()
+    if level == "high":
+        level_factor = 0.58
+    elif level == "medium":
+        level_factor = 0.8
+    else:
+        level_factor = 1.0
+
+    market_factor = 1.0 if market_available else 0.9
+    unc_mult = max(0.35, min(1.0, float(uncertainty_multiplier)))
+
+    score = 100.0 * edge_strength * confidence_factor * band_factor * level_factor * market_factor * unc_mult
+    score = max(0.0, min(99.9, score))
+    grade = _bet_quality_grade(score)
+
+    edge_for_gate = abs(float(market_edge_pick)) if market_edge_pick is not None else abs(float(pre_market_home) - 0.5)
+    actionable_cut = 60.0 if market_available else 42.0
+    actionable = bool(score >= actionable_cut and level != "high" and edge_for_gate >= 0.02)
+
+    return {
+        "score": round(float(score), 1),
+        "grade": grade,
+        "actionable": actionable,
+    }
+
+
+_MATCHUP_DELTA_KEYS = [
+    "home_win_prob",
+    "pre_market_home_win_prob",
+    "model_home_win_prob",
+    "model_home_win_prob_raw",
+    "starter_adjustment",
+    "split_adjustment",
+    "bullpen_adjustment",
+    "bullpen_health_adjustment",
+    "travel_adjustment",
+    "lineup_adjustment",
+    "lineup_health_adjustment",
+    "luck_adjustment",
+    "advanced_adjustment",
+    "market_home_win_prob",
+]
+
+
+def _load_prior_matchup_lookup(
+    reference_date: dt.date,
+    archive_entries: list[dict[str, Any]],
+    max_days: int = 21,
+) -> dict[str, dict[str, Any]]:
+    if not archive_entries:
+        return {}
+
+    lookup: dict[str, dict[str, Any]] = {}
+    scanned_days = 0
+
+    for entry in archive_entries:
+        if scanned_days >= max(1, int(max_days)):
+            break
+
+        ref = _safe_iso_date(entry.get("reference_date"))
+        if ref is None or ref >= reference_date:
+            continue
+
+        scanned_days += 1
+
+        try:
+            payload = read_prediction_archive(ref)
+        except Exception:
+            continue
+
+        if not payload:
+            continue
+
+        for game in payload.get("games", []):
+            if not isinstance(game, dict):
+                continue
+
+            matchup_id = _matchup_id_from_game(game)
+            if matchup_id in lookup:
+                continue
+
+            lookup[matchup_id] = {
+                "reference_date": ref,
+                "game": game,
+            }
+
+    return lookup
+
+
+def _attach_matchup_prediction_deltas(
+    matchup_predictions: list[dict[str, Any]],
+    reference_date: dt.date,
+    archive_entries: list[dict[str, Any]],
+) -> None:
+    prior_lookup = _load_prior_matchup_lookup(reference_date, archive_entries=archive_entries, max_days=21)
+
+    for game in matchup_predictions:
+        matchup_id = _matchup_id_from_game(game)
+        game["matchup_id"] = matchup_id
+
+        prior = prior_lookup.get(matchup_id)
+        if not prior:
+            game["delta_source_date"] = None
+            game["delta_days"] = None
+            game["delta_favored_team_changed"] = None
+            for key in _MATCHUP_DELTA_KEYS:
+                game[f"delta_{key}"] = None
+            continue
+
+        prior_date = prior.get("reference_date")
+        prior_game = prior.get("game", {})
+        prior_date_iso = prior_date.isoformat() if isinstance(prior_date, dt.date) else None
+
+        game["delta_source_date"] = prior_date_iso
+        game["delta_days"] = int((reference_date - prior_date).days) if isinstance(prior_date, dt.date) else None
+
+        prior_favored = str(prior_game.get("favored_team") or "")
+        curr_favored = str(game.get("favored_team") or "")
+        game["delta_favored_team_changed"] = bool(prior_favored and curr_favored and prior_favored != curr_favored)
+
+        for key in _MATCHUP_DELTA_KEYS:
+            current = _safe_float(game.get(key))
+            previous = _safe_float(prior_game.get(key))
+            delta_value = None if current is None or previous is None else float(current - previous)
+            game[f"delta_{key}"] = round(float(delta_value), 4) if delta_value is not None else None
+
+
 def _build_prediction_value_board(matchup_predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
@@ -412,19 +612,29 @@ def _build_prediction_value_board(matchup_predictions: list[dict[str, Any]]) -> 
         uncertainty_multiplier = float(max(0.35, min(1.0, uncertainty_multiplier)))
 
         market_edge_pick = None if market_edge_pick_raw is None else float(market_edge_pick_raw * uncertainty_multiplier)
-
         value_tier = _value_tier(market_edge_pick)
 
-        game_pk = game.get("game_pk")
-        if game_pk is not None:
-            matchup_id = f"pk:{game_pk}"
-        else:
-            matchup_id = f"alt:{game.get('official_date') or ''}|{away_team}|{home_team}"
+        confidence = round(abs(home_prob - 0.5) * 2.0, 4)
+        uncertainty_level = str(game.get("uncertainty_level") or "low")
+        band_half = _safe_float(game.get("home_win_prob_band_half"))
+        bet_quality = _compute_bet_quality(
+            pre_market_home=pre_market_home,
+            home_prob=home_prob,
+            market_edge_pick=market_edge_pick,
+            market_edge_pick_raw=market_edge_pick_raw,
+            confidence=confidence,
+            uncertainty_level=uncertainty_level,
+            uncertainty_multiplier=uncertainty_multiplier,
+            band_half=band_half,
+            market_available=market_pick_prob is not None,
+        )
+
+        matchup_id = _matchup_id_from_game(game)
 
         rows.append(
             {
                 "matchup_id": matchup_id,
-                "game_pk": game_pk,
+                "game_pk": game.get("game_pk"),
                 "official_date": game.get("official_date"),
                 "away_team": away_team,
                 "home_team": home_team,
@@ -435,23 +645,34 @@ def _build_prediction_value_board(matchup_predictions: list[dict[str, Any]]) -> 
                 "market_edge_pick": round(float(market_edge_pick), 4) if market_edge_pick is not None else None,
                 "market_edge_pick_raw": round(float(market_edge_pick_raw), 4) if market_edge_pick_raw is not None else None,
                 "uncertainty_edge_multiplier": round(float(uncertainty_multiplier), 3),
-                "uncertainty_level": str(game.get("uncertainty_level") or "low"),
+                "uncertainty_level": uncertainty_level,
                 "high_uncertainty": bool(game.get("high_uncertainty")),
                 "home_win_prob_band_low": _safe_float(game.get("home_win_prob_band_low")),
                 "home_win_prob_band_high": _safe_float(game.get("home_win_prob_band_high")),
-                "home_win_prob_band_half": _safe_float(game.get("home_win_prob_band_half")),
+                "home_win_prob_band_half": band_half,
                 "uncertainty_note": game.get("uncertainty_note"),
-                "confidence": round(abs(home_prob - 0.5) * 2.0, 4),
+                "confidence": confidence,
                 "value_tier": value_tier,
                 "is_market_upset": is_market_upset,
                 "market_favored_team": market_favored_team,
                 "favored_team": game.get("favored_team"),
                 "favored_win_prob": game.get("favored_win_prob"),
+                "bet_quality_score": bet_quality.get("score"),
+                "bet_quality_grade": bet_quality.get("grade"),
+                "bet_quality_actionable": bool(bet_quality.get("actionable")),
+                "delta_source_date": game.get("delta_source_date"),
+                "delta_days": game.get("delta_days"),
+                "delta_home_win_prob": game.get("delta_home_win_prob"),
+                "delta_pre_market_home_win_prob": game.get("delta_pre_market_home_win_prob"),
+                "delta_model_home_win_prob": game.get("delta_model_home_win_prob"),
+                "delta_market_home_win_prob": game.get("delta_market_home_win_prob"),
+                "delta_favored_team_changed": game.get("delta_favored_team_changed"),
             }
         )
 
     rows.sort(
         key=lambda row: (
+            float(row.get("bet_quality_score") or 0.0),
             abs(float(row.get("market_edge_pick"))) if row.get("market_edge_pick") is not None else -1.0,
             float(row.get("confidence") or 0.0),
         ),
@@ -615,6 +836,9 @@ def _build_team_dataframe(
                 "streak": st.get("streak") or "-",
                 "games_back": st.get("games_back") or "-",
                 "ops": api.get(OPS_KEY),
+                "hitting_ops_risp": api.get(HITTING_OPS_RISP_KEY),
+                "hitting_ops_risp2": api.get(HITTING_OPS_RISP2_KEY),
+                "hitting_ops_late_close": api.get(HITTING_OPS_LATE_CLOSE_KEY),
                 "obp": api.get(OBP_KEY),
                 "slg": api.get(SLG_KEY),
                 "iso_adv": api.get(ISO_ADV_KEY),
@@ -625,6 +849,10 @@ def _build_team_dataframe(
                 "caught_stealing": api.get(HITTING_CAUGHT_STEALING_KEY),
                 "runs_scored": api.get(RUNS_SCORED_KEY),
                 "runs_allowed": api.get(RUNS_ALLOWED_KEY),
+                "pitching_ops_allowed": api.get(PITCHING_OPS_ALLOWED_KEY),
+                "pitching_ops_risp_allowed": api.get(PITCHING_OPS_RISP_ALLOWED_KEY),
+                "pitching_ops_risp2_allowed": api.get(PITCHING_OPS_RISP2_ALLOWED_KEY),
+                "pitching_ops_late_close_allowed": api.get(PITCHING_OPS_LATE_CLOSE_ALLOWED_KEY),
                 "era": api.get(ERA_KEY),
                 "whip": api.get(WHIP_KEY),
                 "pitching_kbb": api.get(PITCHING_KBB_KEY),
@@ -666,6 +894,9 @@ def _build_team_dataframe(
         "win_pct",
         "run_diff",
         "ops",
+        "hitting_ops_risp",
+        "hitting_ops_risp2",
+        "hitting_ops_late_close",
         "obp",
         "slg",
         "iso_adv",
@@ -676,6 +907,10 @@ def _build_team_dataframe(
         "caught_stealing",
         "runs_scored",
         "runs_allowed",
+        "pitching_ops_allowed",
+        "pitching_ops_risp_allowed",
+        "pitching_ops_risp2_allowed",
+        "pitching_ops_late_close_allowed",
         "era",
         "whip",
         "pitching_kbb",
@@ -744,6 +979,47 @@ def _build_team_dataframe(
     runs_allowed_pg_norm = _normalize_series(runs_allowed_pg_z).fillna(0.5)
     runs_allowed_inv_norm = (1.0 - runs_allowed_pg_norm).fillna(0.5)
 
+    hitting_ops_base = df["ops"].fillna(df["ops"].median()).fillna(0.720).clip(0.550, 1.020)
+    hitting_ops_risp = df["hitting_ops_risp"].fillna(hitting_ops_base).clip(0.450, 1.200)
+    hitting_ops_risp2 = df["hitting_ops_risp2"].fillna(hitting_ops_risp).clip(0.420, 1.220)
+    hitting_ops_late_close = df["hitting_ops_late_close"].fillna(hitting_ops_base).clip(0.420, 1.200)
+
+    pitching_ops_base = df["pitching_ops_allowed"].fillna(df["pitching_ops_allowed"].median()).fillna(0.720).clip(0.480, 1.080)
+    pitching_ops_risp_allowed = df["pitching_ops_risp_allowed"].fillna(pitching_ops_base).clip(0.420, 1.220)
+    pitching_ops_risp2_allowed = df["pitching_ops_risp2_allowed"].fillna(pitching_ops_risp_allowed).clip(0.420, 1.220)
+    pitching_ops_late_close_allowed = df["pitching_ops_late_close_allowed"].fillna(pitching_ops_base).clip(0.420, 1.220)
+
+    leverage_sample_conf = (df["games_played"].fillna(0.0) / 95.0).clip(0.25, 1.0)
+
+    leverage_offense_raw = (
+        0.50 * _normalize_series(hitting_ops_late_close)
+        + 0.30 * _normalize_series(hitting_ops_risp2)
+        + 0.20 * _normalize_series(hitting_ops_risp)
+    ).fillna(0.5).clip(0.0, 1.0)
+    leverage_pitching_raw = (
+        0.50 * (1.0 - _normalize_series(pitching_ops_late_close_allowed))
+        + 0.30 * (1.0 - _normalize_series(pitching_ops_risp2_allowed))
+        + 0.20 * (1.0 - _normalize_series(pitching_ops_risp_allowed))
+    ).fillna(0.5).clip(0.0, 1.0)
+
+    leverage_offense_quality = (leverage_sample_conf * leverage_offense_raw + (1.0 - leverage_sample_conf) * 0.5).clip(0.0, 1.0)
+    leverage_pitching_quality = (leverage_sample_conf * leverage_pitching_raw + (1.0 - leverage_sample_conf) * 0.5).clip(0.0, 1.0)
+    leverage_net_quality = (0.52 * leverage_offense_quality + 0.48 * leverage_pitching_quality).clip(0.0, 1.0)
+
+    clutch_offense_delta_ops = (
+        0.55 * (hitting_ops_late_close - hitting_ops_base)
+        + 0.45 * (hitting_ops_risp2 - hitting_ops_base)
+    ).clip(-0.250, 0.250)
+    clutch_pitching_delta_ops = (
+        pitching_ops_base
+        - (0.55 * pitching_ops_late_close_allowed + 0.45 * pitching_ops_risp2_allowed)
+    ).clip(-0.250, 0.250)
+
+    clutch_offense_delta_ops = (clutch_offense_delta_ops * leverage_sample_conf).clip(-0.250, 0.250)
+    clutch_pitching_delta_ops = (clutch_pitching_delta_ops * leverage_sample_conf).clip(-0.250, 0.250)
+    clutch_net_delta_ops = (0.55 * clutch_offense_delta_ops + 0.45 * clutch_pitching_delta_ops).clip(-0.250, 0.250)
+    clutch_index = (0.5 + clutch_net_delta_ops / 0.30).clip(0.0, 1.0)
+
     stolen_base_pct = df["stolen_base_pct"].fillna(df["stolen_base_pct"].median())
     sb_attempts_per_game = (
         (df["stolen_bases"].fillna(0.0) + df["caught_stealing"].fillna(0.0))
@@ -800,38 +1076,38 @@ def _build_team_dataframe(
     df["xfip_proxy"] = xfip_raw.fillna(xfip_formula).clip(2.20, 6.80)
     xfip_inv_norm = (1 - _normalize_series(df["xfip_proxy"])).fillna(0.5)
 
-    # Joe Score v2: data-driven weighting + sample shrinkage + uncertainty bands.
-    joe_target = (
-        0.60 * _normalize_series(df["win_pct"]).fillna(0.5)
-        + 0.40 * _normalize_series(df["run_diff"]).fillna(0.5)
+    # Joe Score v3: fixed 45/40/15 blend (xwOBAcon/xFIP-inverse/clutch) with shrinkage and uncertainty bands.
+    joe_clutch_signal = (0.65 * leverage_net_quality + 0.35 * clutch_index).clip(0.0, 1.0)
+
+    joe_weight_xwobacon = 0.45
+    joe_weight_xfip = 0.40
+    joe_weight_clutch = 0.15
+
+    joe_raw_norm = (
+        joe_weight_xwobacon * xwobacon_norm
+        + joe_weight_xfip * xfip_inv_norm
+        + joe_weight_clutch * joe_clutch_signal
     ).clip(0.0, 1.0)
-
-    joe_off_corr = _abs_corr_series(xwobacon_norm, joe_target)
-    joe_pitch_corr = _abs_corr_series(xfip_inv_norm, joe_target)
-    joe_corr_total = joe_off_corr + joe_pitch_corr
-    if joe_corr_total <= 1e-9:
-        joe_weight_xwobacon = 0.50
-    else:
-        joe_weight_xwobacon = joe_off_corr / joe_corr_total
-    joe_weight_xwobacon = float(np.clip(joe_weight_xwobacon, 0.30, 0.70))
-    joe_weight_xfip = 1.0 - joe_weight_xwobacon
-
-    joe_raw_norm = (joe_weight_xwobacon * xwobacon_norm + joe_weight_xfip * xfip_inv_norm).clip(0.0, 1.0)
     joe_sample_conf = (df["games_played"].fillna(0.0) / 100.0).clip(0.20, 1.0)
-    joe_signal_disagreement = (xwobacon_norm - xfip_inv_norm).abs().clip(0.0, 1.0)
+    joe_signal_disagreement = (
+        0.55 * (xwobacon_norm - xfip_inv_norm).abs()
+        + 0.25 * (xwobacon_norm - joe_clutch_signal).abs()
+        + 0.20 * (xfip_inv_norm - joe_clutch_signal).abs()
+    ).clip(0.0, 1.0)
     joe_agreement_conf = (1.0 - joe_signal_disagreement).clip(0.0, 1.0)
-    joe_reliability = (0.78 * joe_sample_conf + 0.22 * joe_agreement_conf).clip(0.18, 1.0)
+    joe_reliability = (0.76 * joe_sample_conf + 0.24 * joe_agreement_conf).clip(0.18, 1.0)
 
     joe_score_norm = (joe_reliability * joe_raw_norm + (1.0 - joe_reliability) * 0.5).clip(0.0, 1.0)
     joe_uncertainty_points = ((1.0 - joe_reliability) * 20.0 + joe_signal_disagreement * 8.0).clip(2.0, 20.0)
 
     offense_quality = (
-        0.24 * ops_norm
-        + 0.18 * obp_norm
-        + 0.18 * slg_norm
-        + 0.13 * iso_norm
-        + 0.09 * discipline_norm
-        + 0.18 * xwobacon_norm
+        0.22 * ops_norm
+        + 0.16 * obp_norm
+        + 0.16 * slg_norm
+        + 0.12 * iso_norm
+        + 0.08 * discipline_norm
+        + 0.16 * xwobacon_norm
+        + 0.10 * leverage_offense_quality
     ).clip(0.0, 1.0)
 
     kbb_norm = _normalize_series(df["pitching_kbb"]).fillna(0.5)
@@ -840,13 +1116,14 @@ def _build_team_dataframe(
     k_minus_bb_pct_norm = _normalize_series(df["pitching_k_minus_bb_pct"]).fillna(0.5)
 
     run_prevention_quality = (
-        0.22 * era_inv_norm
-        + 0.18 * whip_inv_norm
-        + 0.15 * kbb_norm
-        + 0.12 * hr9_inv_norm
-        + 0.09 * whiff_norm
-        + 0.09 * k_minus_bb_pct_norm
-        + 0.15 * xfip_inv_norm
+        0.20 * era_inv_norm
+        + 0.16 * whip_inv_norm
+        + 0.14 * kbb_norm
+        + 0.11 * hr9_inv_norm
+        + 0.08 * whiff_norm
+        + 0.08 * k_minus_bb_pct_norm
+        + 0.14 * xfip_inv_norm
+        + 0.09 * leverage_pitching_quality
     ).clip(0.0, 1.0)
 
     save_opp = df["save_opportunities"].fillna(0.0)
@@ -919,11 +1196,18 @@ def _build_team_dataframe(
     pythag_point = _signed_scale(df["pythag_win_pct"] - df["win_pct"]).fillna(0.0)
     starter_diff_point = _signed_scale(starter_quality - run_prevention_quality).fillna(0.0)
     bullpen_diff_point = _signed_scale(bullpen_style - run_prevention_quality).fillna(0.0)
+    leverage_point = _signed_scale(leverage_net_quality - leverage_net_quality.median()).fillna(0.0)
+    clutch_point = _signed_scale(clutch_net_delta_ops).fillna(0.0)
     expected_quality_gap = _signed_scale(
         (df["xwobacon_proxy"] - df["xwobacon_proxy"].median())
         - 0.35 * (df["xfip_proxy"] - df["xfip_proxy"].median())
     ).fillna(0.0)
-    context_bucket = 0.025 * (pythag_point + starter_diff_point + bullpen_diff_point) + 0.015 * expected_quality_gap
+    context_bucket = (
+        0.025 * (pythag_point + starter_diff_point + bullpen_diff_point)
+        + 0.015 * expected_quality_gap
+        + 0.010 * leverage_point
+        + 0.008 * clutch_point
+    )
 
     # Improvement: confidence shrinkage early in season to reduce noise from small samples.
     mscore_confidence = (df["games_played"].fillna(0.0) / 80.0).clip(0.35, 1.0)
@@ -1080,6 +1364,20 @@ def _build_team_dataframe(
     )
     df["joe_weight_xwobacon_pct"] = joe_weight_xwobacon * 100.0
     df["joe_weight_xfip_pct"] = joe_weight_xfip * 100.0
+    df["joe_weight_clutch_pct"] = joe_weight_clutch * 100.0
+    df["hitting_ops_risp"] = hitting_ops_risp
+    df["hitting_ops_risp2"] = hitting_ops_risp2
+    df["hitting_ops_late_close"] = hitting_ops_late_close
+    df["pitching_ops_allowed"] = pitching_ops_base
+    df["pitching_ops_risp_allowed"] = pitching_ops_risp_allowed
+    df["pitching_ops_risp2_allowed"] = pitching_ops_risp2_allowed
+    df["pitching_ops_late_close_allowed"] = pitching_ops_late_close_allowed
+    df["leverage_offense_quality"] = leverage_offense_quality * 100.0
+    df["leverage_pitching_quality"] = leverage_pitching_quality * 100.0
+    df["leverage_net_quality"] = leverage_net_quality * 100.0
+    df["clutch_index"] = clutch_index * 100.0
+    df["clutch_offense_delta_ops"] = clutch_offense_delta_ops
+    df["clutch_pitching_delta_ops"] = clutch_pitching_delta_ops
     df["power_minus_d_plus"] = (power_norm - dplus_norm) * 100.0
 
     # Keep legacy gap for compatibility.
@@ -1132,6 +1430,19 @@ def _teams_to_records(df: pd.DataFrame, mlb_api_by_team: dict[str, dict[str, Any
             "mscore_context_component": _to_native(row.get("mscore_context_component"), 4),
             "xwobacon_proxy": _to_native(row.get("xwobacon_proxy"), 4),
             "xfip_proxy": _to_native(row.get("xfip_proxy"), 3),
+            "hitting_ops_risp": _to_native(row.get("hitting_ops_risp"), 3),
+            "hitting_ops_risp2": _to_native(row.get("hitting_ops_risp2"), 3),
+            "hitting_ops_late_close": _to_native(row.get("hitting_ops_late_close"), 3),
+            "pitching_ops_allowed": _to_native(row.get("pitching_ops_allowed"), 3),
+            "pitching_ops_risp_allowed": _to_native(row.get("pitching_ops_risp_allowed"), 3),
+            "pitching_ops_risp2_allowed": _to_native(row.get("pitching_ops_risp2_allowed"), 3),
+            "pitching_ops_late_close_allowed": _to_native(row.get("pitching_ops_late_close_allowed"), 3),
+            "leverage_offense_quality": _to_native(row.get("leverage_offense_quality"), 2),
+            "leverage_pitching_quality": _to_native(row.get("leverage_pitching_quality"), 2),
+            "leverage_net_quality": _to_native(row.get("leverage_net_quality"), 2),
+            "clutch_index": _to_native(row.get("clutch_index"), 2),
+            "clutch_offense_delta_ops": _to_native(row.get("clutch_offense_delta_ops"), 3),
+            "clutch_pitching_delta_ops": _to_native(row.get("clutch_pitching_delta_ops"), 3),
             "joe_score": _to_native(row.get("joe_score"), 2),
             "joe_rank": _to_native(row.get("joe_rank")),
             "joe_confidence": _to_native(row.get("joe_confidence"), 1),
@@ -1141,6 +1452,7 @@ def _teams_to_records(df: pd.DataFrame, mlb_api_by_team: dict[str, dict[str, Any
             "joe_uncertainty_level": row.get("joe_uncertainty_level") or "medium",
             "joe_weight_xwobacon_pct": _to_native(row.get("joe_weight_xwobacon_pct"), 1),
             "joe_weight_xfip_pct": _to_native(row.get("joe_weight_xfip_pct"), 1),
+            "joe_weight_clutch_pct": _to_native(row.get("joe_weight_clutch_pct"), 1),
             "live_power_score": _to_native(row.get("live_power_score"), 2),
             "d_plus_score": _to_native(row.get("d_plus_score"), 2),
             "power_minus_d_plus": _to_native(row.get("power_minus_d_plus"), 3),
@@ -1177,6 +1489,19 @@ def _teams_to_records(df: pd.DataFrame, mlb_api_by_team: dict[str, dict[str, Any
                 "mscore_context_component": _to_native(row.get("mscore_context_component"), 4),
                 "xwobacon_proxy": _to_native(row.get("xwobacon_proxy"), 4),
                 "xfip_proxy": _to_native(row.get("xfip_proxy"), 3),
+                "hitting_ops_risp": _to_native(row.get("hitting_ops_risp"), 3),
+                "hitting_ops_risp2": _to_native(row.get("hitting_ops_risp2"), 3),
+                "hitting_ops_late_close": _to_native(row.get("hitting_ops_late_close"), 3),
+                "pitching_ops_allowed": _to_native(row.get("pitching_ops_allowed"), 3),
+                "pitching_ops_risp_allowed": _to_native(row.get("pitching_ops_risp_allowed"), 3),
+                "pitching_ops_risp2_allowed": _to_native(row.get("pitching_ops_risp2_allowed"), 3),
+                "pitching_ops_late_close_allowed": _to_native(row.get("pitching_ops_late_close_allowed"), 3),
+                "leverage_offense_quality": _to_native(row.get("leverage_offense_quality"), 2),
+                "leverage_pitching_quality": _to_native(row.get("leverage_pitching_quality"), 2),
+                "leverage_net_quality": _to_native(row.get("leverage_net_quality"), 2),
+                "clutch_index": _to_native(row.get("clutch_index"), 2),
+                "clutch_offense_delta_ops": _to_native(row.get("clutch_offense_delta_ops"), 3),
+                "clutch_pitching_delta_ops": _to_native(row.get("clutch_pitching_delta_ops"), 3),
                 "joe_score": _to_native(row.get("joe_score"), 2),
                 "joe_rank": _to_native(row.get("joe_rank")),
                 "joe_confidence": _to_native(row.get("joe_confidence"), 1),
@@ -1186,6 +1511,7 @@ def _teams_to_records(df: pd.DataFrame, mlb_api_by_team: dict[str, dict[str, Any
                 "joe_uncertainty_level": row.get("joe_uncertainty_level") or "medium",
                 "joe_weight_xwobacon_pct": _to_native(row.get("joe_weight_xwobacon_pct"), 1),
                 "joe_weight_xfip_pct": _to_native(row.get("joe_weight_xfip_pct"), 1),
+                "joe_weight_clutch_pct": _to_native(row.get("joe_weight_clutch_pct"), 1),
                 "live_power_score": _to_native(row.get("live_power_score"), 2),
                 "d_plus_score": _to_native(row.get("d_plus_score"), 2),
                 "power_minus_d_plus": _to_native(row.get("power_minus_d_plus"), 3),
@@ -1243,7 +1569,7 @@ def _build_mscore_model_diagnostics(df: pd.DataFrame) -> dict[str, Any]:
         {
             "feature": "mscore_context_component",
             "label": "Context Bucket",
-            "formula": "pythag/regression + starter/bullpen differential + expected contact/pitching gap",
+            "formula": "pythag/regression + starter/bullpen differential + expected gap + leverage/clutch pressure terms",
             "values": pd.to_numeric(df["mscore_context_component"], errors="coerce").fillna(0.0),
         },
     ]
@@ -1327,7 +1653,7 @@ def _build_mscore_model_diagnostics(df: pd.DataFrame) -> dict[str, Any]:
     ablation.sort(key=lambda row: row["mean_abs_rank_shift"], reverse=True)
 
     return {
-        "formula": "mscore = sigmoid((base_bucket + offense_bucket + defense_bucket + context_bucket - 2.90)/0.55) * 100, with early-season confidence shrinkage by games played",
+        "formula": "mscore = sigmoid((base_bucket + offense_bucket + defense_bucket + context_bucket - 2.90)/0.55) * 100, with confidence shrinkage and leverage/clutch pressure context",
         "components": components,
         "ablation": ablation,
     }
@@ -1392,6 +1718,10 @@ def build_snapshot(workbook_path: Path = WORKBOOK_PATH) -> dict[str, Any]:
             "metrics_validation": backtest_report.get("metrics", {}).get("validation", {}),
             "rolling_cv_mean": model_block.get("rolling_cv_mean", backtest_report.get("metrics", {}).get("rolling_cv", {}).get("mean", {})),
             "calibration_test": model_block.get("calibration_test", backtest_report.get("metrics", {}).get("calibration_test", {})),
+            "drift_monitor": model_block.get("drift_monitor", backtest_report.get("metrics", {}).get("drift_monitor", {})),
+            "market_blend_policy": model_block.get("market_blend_policy", {}),
+            "market_blend_summary": model_block.get("market_blend_summary", {}),
+            "pregame_context_summary": model_block.get("pregame_context_summary", {}),
         }
 
         backtest_summary = {
@@ -1403,6 +1733,10 @@ def build_snapshot(workbook_path: Path = WORKBOOK_PATH) -> dict[str, Any]:
             "metrics_test": backtest_report.get("metrics", {}).get("test", {}),
             "rolling_cv_mean": model_block.get("rolling_cv_mean", backtest_report.get("metrics", {}).get("rolling_cv", {}).get("mean", {})),
             "calibration_test": model_block.get("calibration_test", backtest_report.get("metrics", {}).get("calibration_test", {})),
+            "drift_monitor": model_block.get("drift_monitor", backtest_report.get("metrics", {}).get("drift_monitor", {})),
+            "market_blend_policy": model_block.get("market_blend_policy", {}),
+            "market_blend_summary": model_block.get("market_blend_summary", {}),
+            "pregame_context_summary": model_block.get("pregame_context_summary", {}),
             "blend_weight": model_block.get("blend_weight"),
             "calibration": model_block.get("calibration", {}),
             "model_version": model_block.get("model_version", backtest_report.get("model_version")),
@@ -1416,13 +1750,16 @@ def build_snapshot(workbook_path: Path = WORKBOOK_PATH) -> dict[str, Any]:
     except Exception as exc:
         prediction_error = str(exc)
 
+    _attach_matchup_prediction_deltas(
+        matchup_predictions,
+        reference_date=today,
+        archive_entries=archive_status.get("entries", []),
+    )
+
     prediction_value_board = _build_prediction_value_board(matchup_predictions)
     market_matchups_today = sum(1 for row in prediction_value_board if row.get("market_edge_pick") is not None)
-    actionable_value_spots = sum(
-        1
-        for row in prediction_value_board
-        if row.get("market_edge_pick") is not None and abs(float(row.get("market_edge_pick") or 0.0)) >= 0.03
-    )
+    actionable_value_spots = sum(1 for row in prediction_value_board if bool(row.get("bet_quality_actionable")))
+    high_quality_value_spots = sum(1 for row in prediction_value_board if float(row.get("bet_quality_score") or 0.0) >= 75.0)
 
     return {
         "meta": {
@@ -1453,6 +1790,7 @@ def build_snapshot(workbook_path: Path = WORKBOOK_PATH) -> dict[str, Any]:
             "matchup_predictions_count": len(matchup_predictions),
             "market_matchups_today": market_matchups_today,
             "actionable_value_spots": actionable_value_spots,
+            "high_quality_value_spots": high_quality_value_spots,
         },
         "teams": teams,
         "games_today": games_for_dashboard,
@@ -1487,6 +1825,8 @@ RRG_ALLOWED_METRICS = {
     "power_minus_d_plus",
     "power_minus_mscore",
     "coaching_execution_score",
+    "leverage_net_quality",
+    "clutch_index",
 }
 
 
@@ -1515,6 +1855,7 @@ def _snapshot_archive_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "joe_uncertainty_level": team.get("joe_uncertainty_level"),
                 "joe_weight_xwobacon_pct": team.get("joe_weight_xwobacon_pct"),
                 "joe_weight_xfip_pct": team.get("joe_weight_xfip_pct"),
+                "joe_weight_clutch_pct": team.get("joe_weight_clutch_pct"),
                 "power_minus_d_plus": team.get("power_minus_d_plus"),
                 "power_minus_mscore": team.get("power_minus_mscore"),
                 "talent_score": team.get("talent_score"),
@@ -1526,6 +1867,8 @@ def _snapshot_archive_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "coaching_execution_adjustment": team.get("coaching_execution_adjustment"),
                 "coaching_execution_confidence": team.get("coaching_execution_confidence"),
                 "coaching_execution_weight": team.get("coaching_execution_weight"),
+                "leverage_net_quality": team.get("leverage_net_quality"),
+                "clutch_index": team.get("clutch_index"),
             }
         )
 

@@ -287,6 +287,32 @@ def fetch_team_api_metrics(
     catalog: list[dict[str, str]] = []
     seen_keys: set[str] = set()
 
+    def _register_metric(
+        *,
+        team_name: str,
+        composite_key: str,
+        stat_value: Any,
+        label: str,
+        description: str,
+        group_label: str,
+    ) -> None:
+        team_bucket = team_stats.setdefault(team_name, {})
+        team_bucket[composite_key] = _coerce_api_value(stat_value)
+
+        if composite_key in seen_keys:
+            return
+
+        seen_keys.add(composite_key)
+        catalog.append(
+            {
+                "key": composite_key,
+                "label": label,
+                "description": description,
+                "group": group_label,
+                "sheet": "MLB Stats API",
+            }
+        )
+
     for block in payload.get("stats", []):
         stat_type_raw = _clean_text(block.get("type", {}).get("displayName", "unknown"))
         stat_type = "season" if historical_mode and stat_type_raw == "byDateRange" else stat_type_raw
@@ -298,25 +324,78 @@ def fetch_team_api_metrics(
             if not team_name:
                 continue
 
-            team_bucket = team_stats.setdefault(team_name, {})
-            stats = split.get("stat", {})
-
+            stats = split.get("stat", {}) or {}
             for stat_key, stat_value in stats.items():
                 composite_key = _api_stat_key(stat_type, group, stat_key)
-                team_bucket[composite_key] = _coerce_api_value(stat_value)
+                _register_metric(
+                    team_name=team_name,
+                    composite_key=composite_key,
+                    stat_value=stat_value,
+                    label=f"{_humanize_stat_key(stat_key)} ({group_title}, {stat_type})",
+                    description=_describe_api_stat(stat_key, group, stat_type),
+                    group_label=f"MLB API - {group_title} ({stat_type})",
+                )
 
-                if composite_key in seen_keys:
-                    continue
+    # Add true situation-split team metrics for leverage contexts.
+    split_codes = [
+        ("risp", "Scoring Position"),
+        ("risp2", "Scoring Position - 2 Outs"),
+        ("lc", "Late / Close"),
+    ]
 
-                seen_keys.add(composite_key)
-                catalog.append(
+    for group in ("hitting", "pitching"):
+        group_title = group.capitalize()
+        for split_code, split_label in split_codes:
+            split_params: dict[str, Any] = {
+                "sportId": 1,
+                "season": season,
+                "stats": "statSplits",
+                "group": group,
+                "sitCodes": split_code,
+            }
+
+            if historical_mode:
+                start_date = dt.date(season, 1, 1)
+                split_params.update(
                     {
-                        "key": composite_key,
-                        "label": f"{_humanize_stat_key(stat_key)} ({group_title}, {stat_type})",
-                        "description": _describe_api_stat(stat_key, group, stat_type),
-                        "group": f"MLB API - {group_title} ({stat_type})",
-                        "sheet": "MLB Stats API",
+                        "startDate": start_date.isoformat(),
+                        "endDate": through_date.isoformat(),
+                        "gameType": "R",
                     }
                 )
+
+            try:
+                split_response = requests.get(
+                    f"{BASE_API_URL}/teams/stats",
+                    params=split_params,
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+                split_response.raise_for_status()
+                split_payload = split_response.json()
+            except Exception:
+                continue
+
+            for block in split_payload.get("stats", []):
+                for split in block.get("splits", []):
+                    team_name = split.get("team", {}).get("name")
+                    if not team_name:
+                        continue
+
+                    split_meta = split.get("split", {}) or {}
+                    split_desc = _clean_text(split_meta.get("description") or split_label)
+                    stats = split.get("stat", {}) or {}
+
+                    for stat_key, stat_value in stats.items():
+                        composite_key = f"mlb::situational::{group}::{split_code}::{stat_key}"
+                        base_desc = API_STAT_DESCRIPTION_MAP.get(stat_key) or f"{_humanize_stat_key(stat_key)} in {split_desc.lower()} situations."
+                        description = f"{base_desc} Source: MLB Stats API team {group} statSplits ({split_desc}, code {split_code})."
+                        _register_metric(
+                            team_name=team_name,
+                            composite_key=composite_key,
+                            stat_value=stat_value,
+                            label=f"{_humanize_stat_key(stat_key)} ({group_title}, {split_desc})",
+                            description=description,
+                            group_label=f"MLB API - {group_title} (Situation: {split_desc})",
+                        )
 
     return team_stats, catalog

@@ -7,3 +7,7 @@ data/snapshot_archive/
 data/backtest_model_*.joblib
 data/backtest_report_*.json
 data/*.pid
+
+.env
+.env.*
+!.env.example
